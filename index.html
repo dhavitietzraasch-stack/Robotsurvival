@@ -67,10 +67,10 @@
     <kbd>Q</kbd> Laser &nbsp;<kbd>E</kbd> Construir &nbsp;<kbd>R</kbd> Destruir &nbsp;<kbd>B</kbd> Ciclar Bloco &nbsp;<kbd>U</kbd> Upgrades<br>
     <kbd>F</kbd> Teleporte ao cursor (gasta toda energia · 4s cooldown)<br>
     <kbd>V</kbd> Navegação A.R.I.A — rota holográfica até antena<br>
-    <kbd>I</kbd> Inventário &amp; Crafting &nbsp;|&nbsp; <kbd>T</kbd> Usar item selecionado &nbsp;|&nbsp; <kbd>C</kbd> Craftar (inventário aberto)<br>
-    <kbd>X</kbd> Descartar item sob o mouse (inventário aberto) &nbsp;<kbd>Shift+X</kbd> Descartar pilha toda<br>
+    <kbd>P</kbd> Pausar/Retomar — também pausa sozinho ao abrir Evolução<br>
+    <kbd>Scroll</kbd> Ciclar arma desbloqueada<br>
     <kbd>G</kbd> Scanner — segure sobre tile próximo (≤3 tiles) para catalogar material<br>
-    Minérios: 🪨 Carvão/Cobre em rochas · ⚙ Ferro/Ouro no subsolo · 💎 Cristal profundo<br>
+    Ao limpar cada onda: escolha 1 de 3 chips de upgrade para UNIDADE-7 — alguns têm limite de compra<br>
     Modo Criativo: biomas não afetam stats · construção ilimitada · sem inimigos
   </div>
 </div>
@@ -124,6 +124,7 @@
       </div>
       <div style="display:flex;gap:4px;align-items:center;">
         <span id="hudModeLabel" style="font-family:var(--font-ui);font-size:9px;letter-spacing:.1em;color:var(--cyan);background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:3px 10px;">🎯 FINITO</span>
+        <button id="btnPause" class="btn btn-sm btn-secondary" style="pointer-events:auto;padding:5px 12px;font-size:10px;" title="Pausar (P)">⏸ Pause</button>
         <button id="btnARIANav" class="btn btn-sm btn-secondary" style="pointer-events:auto;padding:5px 12px;font-size:10px;" title="Navegação ARIA (V)">📡 A.R.I.A</button>
       </div>
       <button id="btnMenu" class="btn btn-sm btn-secondary" style="pointer-events:auto;">☰ Menu</button>
@@ -138,9 +139,6 @@
 
   <!-- alert flash (bottom-left, handled by CSS) -->
   <div id="hudAlert" class="hud-alert"></div>
-
-  <!-- cave overlay -->
-  <div id="caveOverlay"></div>
 
   <!-- minimap (bottom-right) -->
   <div id="minimap">
@@ -167,8 +165,8 @@
 <script src="biomes.js"></script>
 <script src="ai-enemy.js"></script>
 <script src="ai-survival.js"></script>
-<script src="systems.js"></script>
 <script src="game.js"></script>
+<script src="roguelike.js"></script>
 <script src="world-gen.js"></script>
 <script src="scanner.js"></script>
 </body>

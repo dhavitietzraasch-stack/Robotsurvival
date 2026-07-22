@@ -112,28 +112,22 @@ const BIOME_INFO = {
     [T.CORAL]:       {name:'Recife de Coral',   drag:.890},
     [T.TUNDRA]:      {name:'Tundra',            drag:.982},
     [T.SAVANNA]:     {name:'Savana',            drag:.981},
-    [T.PORTAL]:      {name:'Portal',            drag:.984},
-  },
-  underground:{
-    [T.DIRT]:        {name:'Caverna',           drag:.984},
+    [T.PORTAL]:      {name:'Antena',            drag:.984},
+    [T.DIRT]:        {name:'Terra',             drag:.984},
     [T.STONE]:       {name:'Pedra',             drag:.984},
     [T.IRON]:        {name:'Minério de Ferro',  drag:.984},
     [T.CRYSTAL]:     {name:'Cristal',           drag:.984},
     [T.OBSIDIAN]:    {name:'Obsidiana',         drag:.984},
-    [T.CAVE_WALL]:   {name:'Parede de Caverna', drag:.984},
-    [T.CAVE_FLOOR]:  {name:'Chão de Caverna',   drag:.984},
+    [T.CAVE_WALL]:   {name:'Estrutura',         drag:.984},
+    [T.CAVE_FLOOR]:  {name:'Chão de Estrutura', drag:.984},
     [T.CRYSTAL_FLOOR]:{name:'Chão de Cristal',  drag:.985},
+    [T.VOID_FLOOR]:  {name:'Assoalho Anômalo',  drag:.990},
+    [T.GHOST_GRASS]: {name:'Grama Fantasma',    drag:.985},
   },
-  void:{
-    [T.VOID_FLOOR]:  {name:'Dimensão Void',     drag:.990},
-    [T.GHOST_GRASS]: {name:'Prado Fantasma',    drag:.985},
-    [T.PORTAL]:      {name:'Portal',            drag:.984},
-  }
 };
 
-// ─── Dimensões ───────────────────────────────────────────────
-const DIM = { SURFACE:0, UNDERGROUND:1, VOID:2 };
-const DIM_NAMES = ['Superfície','Subsolo','Dimensão Void'];
+// ─── Mundo (dimensão única — Superfície) ──────────────────────
+const DIM = { SURFACE:0 };
 
 // Grids alocados dinamicamente em initWorldBuffers()
 let worldGrids = {};
@@ -155,17 +149,24 @@ let flowFields = {};
 let dirFields  = {};
 let flowField, dirField;
 
+// ─── PERF: cache de cores de tile ────────────────────────────
+// Tiles "estáticos" (cor não depende de `time`, só de tx/ty) têm sua
+// string hsl(...) calculada uma vez e reaproveitada, em vez de recriar
+// a string (e recalcular sin/cos) a cada tile visível em TODO frame.
+// Invalidado por setTile() quando o tile daquele índice muda.
+let tileColorCacheBuffers = {};
 function initWorldBuffers(){
   CHUNKS_X = Math.ceil(WORLD_W / CHUNK_SIZE);
   CHUNKS_Y = Math.ceil(WORLD_H / CHUNK_SIZE);
   const sz = WORLD_W * WORLD_H;
   const chunkSz = CHUNKS_X * CHUNKS_Y;
-  for(const d of [DIM.SURFACE, DIM.UNDERGROUND, DIM.VOID]){
+  for(const d of [DIM.SURFACE]){
     worldGrids[d]      = new Uint8Array(sz);
     integrities[d]     = new Uint16Array(sz);
     chunkDirtyBuffers[d] = new Uint8Array(chunkSz).fill(1);
     flowFields[d]      = new Float32Array(sz).fill(Infinity);
     dirFields[d]       = new Uint8Array(sz);
+    tileColorCacheBuffers[d] = new Array(sz).fill(null);
   }
   chunkDirty = chunkDirtyBuffers[DIM.SURFACE];
   flowField  = flowFields[DIM.SURFACE];
@@ -178,9 +179,12 @@ function getTile(tx,ty){if(!inBounds(tx,ty))return T.STONE;return worldGrid()[wi
 
 function setTile(tx,ty,id,integ){
   if(!inBounds(tx,ty))return;
-  worldGrid()[wi(tx,ty)]=id;
+  const idx=wi(tx,ty);
+  worldGrid()[idx]=id;
   const defaultInteg = BLOCK_INTEGRITY[id] !== undefined ? BLOCK_INTEGRITY[id] : 0;
-  integrity()[wi(tx,ty)]=integ!==undefined?integ:defaultInteg;
+  integrity()[idx]=integ!==undefined?integ:defaultInteg;
+  const colorCache=tileColorCacheBuffers[currentDim];
+  if(colorCache) colorCache[idx]=null; // PERF: invalida cor cacheada (tile mudou)
   markChunkDirty(tx,ty);
   minimapDirty=true;
 }
@@ -300,7 +304,18 @@ function mulberry32(a){
   return()=>{let t=a+=0x6D2B79F5;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return((t^t>>>14)>>>0)/4294967296;};
 }
 function createNoise(prng){
-  const grad=new Float32Array([1,1,0,-1,1,0,1,-1,0,-1,-1,0,1,0,1,-1,0,1,1,0,-1,-1,0,1,1,0,-1,1,0,1,-1,0,-1,-1]);
+  // v3.1 — FIX CRÍTICO: esta tabela tinha 34 valores (faltavam 2) e a cauda
+  // estava fora de ordem. O algoritmo indexa até grad[33+1]=grad[34], então
+  // com só 34 valores (índices 0-33) essa leitura vinha `undefined` → NaN.
+  // Isso corrompia ~1/3 dos lookups de gradiente (3 por chamada de noise()),
+  // o que tornava ~86% de TODAS as amostras de ruído NaN — e como `NaN > x`
+  // é sempre falso, a cascata de classificação de bioma falhava em todo
+  // teste de umidade/temperatura e caía no branch final (deserto). Isso
+  // explica tanto o excesso de deserto quanto a água só nas bordas (a única
+  // água "real" era a máscara elíptica geométrica do passo 9, que não
+  // depende deste ruído). Tabela correta: 12 vetores de gradiente × 3
+  // componentes = 36 valores.
+  const grad=new Float32Array([1,1,0, -1,1,0, 1,-1,0, -1,-1,0, 1,0,1, -1,0,1, 1,0,-1, -1,0,-1, 0,1,1, 0,-1,1, 0,1,-1, 0,-1,-1]);
   const p=new Uint8Array(256);for(let i=0;i<256;i++)p[i]=i;
   for(let i=255;i>0;i--){const r=Math.floor(prng()*(i+1));[p[i],p[r]]=[p[r],p[i]];}
   const perm=new Uint8Array(512);for(let i=0;i<512;i++)perm[i]=p[i&255];
@@ -320,403 +335,12 @@ function createNoise(prng){
 }
 
 // ─── World Generation — Superfície ───────────────────────────
-// Usa Voronoi de biomas: define N centros de bioma, cada tile pertence ao centro mais próximo
-// Isso gera regiões grandes e limpas sem "sal e pimenta"
-function generateSurface(rand, rng0){
-  const wg = worldGrids[DIM.SURFACE];
-  const ig = integrities[DIM.SURFACE];
+// (a geração real é definida em world-gen.js, que sobrescreve
+//  window.generateSurface — sistema de dimensões extras removido)
 
-  const nElev  = createNoise(mulberry32(rng0()));
-  const nMoist = createNoise(mulberry32(rng0()));
-  const nTemp  = createNoise(mulberry32(rng0()));
-  const nRock  = createNoise(mulberry32(rng0()));
-  const nRiver = createNoise(mulberry32(rng0()));
-  const nSpec  = createNoise(mulberry32(rng0()));
-
-  // ── Voronoi de biomas ──────────────────────────────────────
-  // Define regiões grandes: cada ponto pertence ao bioma do centro mais próximo
-  const NUM_BIOME_CENTERS = 28;
-  const biomeCenters = [];
-  const BIOME_TYPES = [
-    T.GRASS, T.GRASS, T.GRASS,         // mais pradaria
-    T.FOREST, T.FOREST,                 // bastante floresta
-    T.DESERT, T.SAVANNA,
-    T.SNOW, T.TUNDRA, T.ICE,
-    T.SWAMP,
-    T.MUSHROOM,
-    T.VOLCANIC_ASH,
-    T.TOXIC,
-  ];
-  for(let i=0;i<NUM_BIOME_CENTERS;i++){
-    biomeCenters.push({
-      x: rand()*WORLD_W,
-      y: rand()*WORLD_H,
-      type: BIOME_TYPES[Math.floor(rand()*BIOME_TYPES.length)]
-    });
-  }
-
-  // Pre-computa bioma Voronoi com relaxamento
-  const voronoiBiome = new Uint8Array(WORLD_W * WORLD_H);
-  for(let ty=0;ty<WORLD_H;ty++){
-    for(let tx=0;tx<WORLD_W;tx++){
-      let best=Infinity, bt=T.GRASS;
-      for(const c of biomeCenters){
-        const d=(tx-c.x)*(tx-c.x)+(ty-c.y)*(ty-c.y);
-        if(d<best){best=d;bt=c.type;}
-      }
-      voronoiBiome[wi(tx,ty)]=bt;
-    }
-  }
-
-  for(let ty=0;ty<WORLD_H;ty++){
-    for(let tx=0;tx<WORLD_W;tx++){
-      const e1 = nElev(tx*0.006,      ty*0.006);
-      const e2 = nElev(tx*0.018+100,  ty*0.018-50) * 0.40;
-      const e3 = nElev(tx*0.003+500,  ty*0.003+300) * 0.55;
-      const elev  = e1*0.50 + e2 + e3*0.50;
-
-      const rockN  = nRock(tx*0.050+9000, ty*0.050+9000);
-      const rockN2 = nRock(tx*0.100+4444, ty*0.100+4444)*0.45;
-      const rockVal = rockN + rockN2;
-
-      // Paredes de pedra (~12%) — com minérios embutidos
-      if(rockVal > 0.62){
-        let tile;
-        if(rockVal > 0.74)      tile = T.STONE;
-        else if(rockVal > 0.72) tile = T.IRON;   // veio de ferro mais raro na superfície
-        else if(rockVal > 0.70) tile = T.IRON;
-        else if(rockVal > 0.68) tile = T.CRYSTAL;
-        else                    tile = T.ROCK;
-        wg[wi(tx,ty)] = tile;
-        ig[wi(tx,ty)] = BLOCK_INTEGRITY[tile]||100;
-        continue;
-      }
-
-      // Água (zonas de baixa elevação)
-      if(elev < -0.42){
-        wg[wi(tx,ty)] = T.DEEP_WATER; ig[wi(tx,ty)]=0; continue;
-      }
-      if(elev < -0.26){
-        wg[wi(tx,ty)] = T.WATER; ig[wi(tx,ty)]=0; continue;
-      }
-
-      // Rios — faixas estreitas de água
-      const river = nRiver(tx*0.018+400, ty*0.018-200);
-      if(Math.abs(river) < 0.055 && elev < 0.28){
-        wg[wi(tx,ty)] = T.WATER; ig[wi(tx,ty)]=0; continue;
-      }
-
-      // Praia: transição entre água e terra
-      if(elev < -0.10){
-        wg[wi(tx,ty)] = T.SAND; ig[wi(tx,ty)]=0; continue;
-      }
-
-      // Montanha (elevação muito alta) → neve independente do bioma
-      if(elev > 0.48){
-        wg[wi(tx,ty)] = T.SNOW; ig[wi(tx,ty)]=0; continue;
-      }
-
-      // Região vulcânica especial (spec alto)
-      const spec = nSpec(tx*0.035+5000, ty*0.035+7000);
-      if(spec > 0.68){ wg[wi(tx,ty)] = T.LAVA; ig[wi(tx,ty)]=0; continue; }
-      if(spec > 0.58 && spec <= 0.68){ wg[wi(tx,ty)] = T.VOLCANIC_ASH; ig[wi(tx,ty)]=0; continue; }
-
-      // Usa bioma Voronoi + suavização por elevação/umidade
-      let tile = voronoiBiome[wi(tx,ty)];
-      const moist = nMoist(tx*0.010+2000, ty*0.010-2000);
-
-      // Biomas de fronteira: se estiver próximo da água, vira praia/pântano
-      if(elev < 0.05 && (tile===T.GRASS||tile===T.SAVANNA)){
-        if(moist > 0.2) tile = T.SWAMP;
-        else tile = T.SAND;
-      }
-      // Lava em zonas vulcânicas faz transição para cinzas
-      if(tile===T.VOLCANIC_ASH && spec < 0.30) tile = T.SAVANNA;
-
-      // Coral em água rasa com temperatura alta
-      if(tile===T.CORAL) tile = T.WATER; // Coral é sub-tile, não standalone
-
-      wg[wi(tx,ty)] = tile;
-      ig[wi(tx,ty)] = 0;
-    }
-  }
-
-  // Segunda passagem: suavizar fronteiras de biomas (evitar sal-e-pimenta)
-  // Remove tiles isolados rodeados de outro bioma
-  const scratch = new Uint8Array(wg);
-  for(let ty=1;ty<WORLD_H-1;ty++){
-    for(let tx=1;tx<WORLD_W-1;tx++){
-      const t = scratch[wi(tx,ty)];
-      if(SOLID.has(t)||t===T.WATER||t===T.DEEP_WATER||t===T.LAVA) continue;
-      // Contar vizinhos do mesmo tipo
-      let same=0,total=0;
-      for(const [ddx,ddy] of DIRS.slice(0,4)){
-        const nt=scratch[wi(tx+ddx,ty+ddy)];
-        if(!SOLID.has(nt)&&nt!==T.WATER&&nt!==T.DEEP_WATER&&nt!==T.LAVA){
-          total++;
-          if(nt===t) same++;
-        }
-      }
-      // Tile completamente isolado → troca pelo bioma mais comum dos vizinhos
-      if(same===0&&total>=3){
-        const counts={};
-        for(const [ddx,ddy] of DIRS.slice(0,4)){
-          const nt=scratch[wi(tx+ddx,ty+ddy)];
-          if(!SOLID.has(nt)) counts[nt]=(counts[nt]||0)+1;
-        }
-        let bestN=0,bestT=t;
-        for(const [tid,cnt] of Object.entries(counts)){
-          if(cnt>bestN){bestN=cnt;bestT=+tid;}
-        }
-        wg[wi(tx,ty)] = bestT;
-      }
-    }
-  }
-
-  // Borda do mapa = pedra
-  for(let tx=0;tx<WORLD_W;tx++){
-    wg[wi(tx,0)]=T.STONE; wg[wi(tx,WORLD_H-1)]=T.STONE;
-  }
-  for(let ty=0;ty<WORLD_H;ty++){
-    wg[wi(0,ty)]=T.STONE; wg[wi(WORLD_W-1,ty)]=T.STONE;
-  }
-
-  // Portais para o subsolo (N locais)
-  const NUM_PORTALS = 6;
-  const portalPositions = [];
-  for(let i=0;i<NUM_PORTALS;i++){
-    const px = 30 + Math.floor(rand()*(WORLD_W-60));
-    const py = 30 + Math.floor(rand()*(WORLD_H-60));
-    // Coloca portal em tile transitável
-    for(let dr=0;dr<=5;dr++){
-      for(let ddx=-dr;ddx<=dr;ddx++){
-        for(let ddy=-dr;ddy<=dr;ddy++){
-          if(Math.abs(ddx)!==dr&&Math.abs(ddy)!==dr) continue;
-          const ptx=clamp(px+ddx,2,WORLD_W-3);
-          const pty=clamp(py+ddy,2,WORLD_H-3);
-          if(!SOLID.has(wg[wi(ptx,pty)])&&wg[wi(ptx,pty)]!==T.DEEP_WATER&&wg[wi(ptx,pty)]!==T.LAVA){
-            wg[wi(ptx,pty)] = T.PORTAL;
-            portalPositions.push({tx:ptx,ty:pty,targetDim:DIM.UNDERGROUND});
-            ddx=100;ddy=100;dr=100; // break all loops
-          }
-        }
-      }
-    }
-  }
-  return portalPositions;
-}
-
-// ─── World Generation — Subsolo ──────────────────────────────
-function generateUnderground(rand, rng0){
-  const wg = worldGrids[DIM.UNDERGROUND];
-  const ig = integrities[DIM.UNDERGROUND];
-  const nOre   = createNoise(mulberry32(rng0()));
-  const nCryst = createNoise(mulberry32(rng0()));
-  const nWall  = createNoise(mulberry32(rng0()));
-  // consume extra rng0 calls to preserve seed parity with original
-  rng0(); rng0(); // nCave, nCave2 removidos → dois calls reservados
-
-  // Tudo começa como STONE
-  wg.fill(T.STONE);
-  ig.fill(0);
-
-  /* ── Worm Carver ───────────────────────────────────────────
-     Escava cavernas tipo-túnel por caminhadas aleatórias.
-     Resultado: corredores orgânicos pequenos + câmaras ocasionais.
-     Muito mais irregular e menor que o método de noise antigo.
-  ─────────────────────────────────────────────────────────── */
-  const CARVE = new Uint8Array(WORLD_W * WORLD_H); // 1 = escavado
-
-  function carveCircle(cx, cy, r){
-    const ir = Math.ceil(r);
-    for(let dy=-ir; dy<=ir; dy++){
-      for(let dx=-ir; dx<=ir; dx++){
-        if(dx*dx+dy*dy <= r*r){
-          const tx2=Math.round(cx+dx), ty2=Math.round(cy+dy);
-          if(inBounds(tx2,ty2)) CARVE[wi(tx2,ty2)]=1;
-        }
-      }
-    }
-  }
-
-  // Densidade de worms proporcional ao tamanho do mapa
-  const mapArea = WORLD_W * WORLD_H;
-  const NUM_WORMS = Math.floor(mapArea / 3200) + 10; // ≈ mapa médio 800×600 → ~150+10
-  const TUNNEL_WORMS = Math.floor(NUM_WORMS * 0.75);  // 75% são túneis longos
-  const ROOM_WORMS   = NUM_WORMS - TUNNEL_WORMS;       // 25% criam câmaras
-
-  // Túneis — caminhadas longas com raio pequeno
-  for(let w=0; w<TUNNEL_WORMS; w++){
-    let cx = 6 + Math.floor(rand()*(WORLD_W-12));
-    let cy = 6 + Math.floor(rand()*(WORLD_H-12));
-    const steps = 50 + Math.floor(rand()*100);
-    let angle = rand() * Math.PI * 2;
-    const radius = 1 + Math.floor(rand()*2); // raio 1–2 tiles
-
-    for(let s=0; s<steps; s++){
-      carveCircle(cx, cy, radius);
-      // Curvas suaves — muda direção levemente a cada passo
-      angle += (rand()-0.5) * 0.7;
-      cx += Math.cos(angle) * 1.5;
-      cy += Math.sin(angle) * 1.0;
-      // Manter dentro dos limites seguros
-      cx = Math.max(4, Math.min(WORLD_W-5, cx));
-      cy = Math.max(4, Math.min(WORLD_H-5, cy));
-    }
-  }
-
-  // Câmaras — círculos maiores em posições aleatórias (conectam túneis)
-  for(let w=0; w<ROOM_WORMS; w++){
-    const cx = 10 + Math.floor(rand()*(WORLD_W-20));
-    const cy = 10 + Math.floor(rand()*(WORLD_H-20));
-    const r = 4 + Math.floor(rand()*5); // raio 4–8 tiles
-    carveCircle(cx, cy, r);
-  }
-
-  /* ── Preencher tiles escavados com piso/minérios ─────────── */
-  for(let ty=1; ty<WORLD_H-1; ty++){
-    for(let tx=1; tx<WORLD_W-1; tx++){
-      const idx = wi(tx,ty);
-      if(CARVE[idx]){
-        const ore   = nOre(tx*0.060+1000, ty*0.060+2000);
-        const cryst = nCryst(tx*0.050+3000, ty*0.050+4000);
-        let tile = T.CAVE_FLOOR;
-        if(ore > 0.58)              tile = T.IRON;
-        else if(cryst > 0.60)       tile = T.CRYSTAL_FLOOR;
-        else if(ore > 0.48 && cryst < 0.40) tile = T.DIRT;
-        wg[idx] = tile;
-        ig[idx] = BLOCK_INTEGRITY[tile]||0;
-      } else {
-        // Parede — variar tipo por noise
-        const ore = nOre(tx*0.080+9000, ty*0.080+8000);
-        const w2  = nWall(tx*0.040+5000, ty*0.040+6000);
-        let tile = T.CAVE_WALL;
-        if(ore > 0.72)     tile = T.OBSIDIAN;
-        else if(ore > 0.65) tile = T.IRON;
-        else if(w2 > 0.65)  tile = T.STONE;
-        wg[idx] = tile;
-        ig[idx] = BLOCK_INTEGRITY[tile]||80;
-      }
-    }
-  }
-
-  // Borda irregular 1–8 tiles (forma orgânica com noise)
-  const nBorderU = createNoise(mulberry32(rng0()));
-  function borderU(pos, seedOff){
-    const n = nBorderU(pos * 0.08 + seedOff, seedOff * 0.3);
-    return Math.max(1, Math.min(8, Math.round((n * 0.5 + 0.5) * 7 + 1)));
-  }
-  for(let tx=0;tx<WORLD_W;tx++){
-    const tTop=borderU(tx,0), tBot=borderU(tx,50);
-    for(let d=0;d<tTop;d++)    wg[wi(tx,d)]=T.CAVE_WALL;
-    for(let d=0;d<tBot;d++)    wg[wi(tx,WORLD_H-1-d)]=T.CAVE_WALL;
-  }
-  for(let ty=0;ty<WORLD_H;ty++){
-    const tL=borderU(ty,100), tR=borderU(ty,150);
-    for(let d=0;d<tL;d++)      wg[wi(d,ty)]=T.CAVE_WALL;
-    for(let d=0;d<tR;d++)      wg[wi(WORLD_W-1-d,ty)]=T.CAVE_WALL;
-  }
-
-  // Garantir área de spawn no centro sempre aberta (5×5 de CAVE_FLOOR)
-  const csx=Math.floor(WORLD_W/2), csy=Math.floor(WORLD_H/2);
-  for(let dx=-4;dx<=4;dx++)
-    for(let dy=-4;dy<=4;dy++)
-      if(inBounds(csx+dx,csy+dy)){
-        wg[wi(csx+dx,csy+dy)]=T.CAVE_FLOOR;
-        ig[wi(csx+dx,csy+dy)]=0;
-      }
-
-  // Portais de volta + portal pro Void
-  const portalPositions = [];
-  const NUM_BACK = 4, NUM_VOID = 3;
-  for(let i=0;i<NUM_BACK+NUM_VOID;i++){
-    const px = 20 + Math.floor(rand()*(WORLD_W-40));
-    const py = 20 + Math.floor(rand()*(WORLD_H-40));
-    for(let dr=0;dr<=8;dr++){
-      let placed=false;
-      for(let ddx=-dr;ddx<=dr&&!placed;ddx++){
-        for(let ddy=-dr;ddy<=dr&&!placed;ddy++){
-          if(Math.abs(ddx)!==dr&&Math.abs(ddy)!==dr) continue;
-          const ptx=clamp(px+ddx,2,WORLD_W-3);
-          const pty=clamp(py+ddy,2,WORLD_H-3);
-          if(wg[wi(ptx,pty)]===T.CAVE_FLOOR||wg[wi(ptx,pty)]===T.DIRT||wg[wi(ptx,pty)]===T.CRYSTAL_FLOOR){
-            wg[wi(ptx,pty)] = T.PORTAL;
-            portalPositions.push({tx:ptx,ty:pty,targetDim:i<NUM_BACK?DIM.SURFACE:DIM.VOID});
-            placed=true;
-          }
-        }
-      }
-      if(placed) break;
-    }
-  }
-  return portalPositions;
-}
-
-// ─── World Generation — Void ──────────────────────────────────
-function generateVoid(rand, rng0){
-  const wg = worldGrids[DIM.VOID];
-  const ig = integrities[DIM.VOID];
-  const nVoid  = createNoise(mulberry32(rng0()));
-  const nRune  = createNoise(mulberry32(rng0()));
-
-  wg.fill(T.AIR); // Void começa todo abismo
-  ig.fill(0);
-
-  // Ilhas de chão void flutuando sobre o abismo
-  const NUM_ISLANDS = 18;
-  for(let i=0;i<NUM_ISLANDS;i++){
-    const cx = 20 + Math.floor(rand()*(WORLD_W-40));
-    const cy = 20 + Math.floor(rand()*(WORLD_H-40));
-    const radius = 8 + Math.floor(rand()*20);
-    for(let ty=cy-radius;ty<=cy+radius;ty++){
-      for(let tx=cx-radius;tx<=cx+radius;tx++){
-        if(!inBounds(tx,ty)) continue;
-        const d=Math.hypot(tx-cx,ty-cy);
-        const noise = nVoid(tx*0.08+i*100, ty*0.08+i*200)*0.3;
-        if(d < radius*(0.7+noise)){
-          const rune = nRune(tx*0.12+500, ty*0.12+600);
-          let tile = T.VOID_FLOOR;
-          if(d > radius*0.65) tile = T.VOID_WALL; // borda da ilha = parede
-          else if(rune > 0.72) tile = T.RUNE_STONE;
-          else if(rune > 0.60) tile = T.GHOST_GRASS;
-          wg[wi(tx,ty)] = tile;
-          ig[wi(tx,ty)] = BLOCK_INTEGRITY[tile]||0;
-        }
-      }
-    }
-  }
-
-  // Portais de volta
-  const portalPositions = [];
-  for(let i=0;i<4;i++){
-    const px = 15 + Math.floor(rand()*(WORLD_W-30));
-    const py = 15 + Math.floor(rand()*(WORLD_H-30));
-    for(let dr=0;dr<=12;dr++){
-      let placed=false;
-      for(let ddx=-dr;ddx<=dr&&!placed;ddx++){
-        for(let ddy=-dr;ddy<=dr&&!placed;ddy++){
-          if(Math.abs(ddx)!==dr&&Math.abs(ddy)!==dr) continue;
-          const ptx=clamp(px+ddx,2,WORLD_W-3);
-          const pty=clamp(py+ddy,2,WORLD_H-3);
-          const tt=wg[wi(ptx,pty)];
-          if(tt===T.VOID_FLOOR||tt===T.GHOST_GRASS){
-            wg[wi(ptx,pty)] = T.PORTAL;
-            portalPositions.push({tx:ptx,ty:pty,targetDim:DIM.SURFACE});
-            placed=true;
-          }
-        }
-      }
-      if(placed) break;
-    }
-  }
-  return portalPositions;
-}
-
-// Portal positions per dimension
+// Antenas ativáveis (não há mais portais entre dimensões)
 const portalMap = {
-  [DIM.SURFACE]:     [],
-  [DIM.UNDERGROUND]: [],
-  [DIM.VOID]:        [],
+  [DIM.SURFACE]: [],
 };
 
 // Antenna positions (structures to activate for rescue)
@@ -973,19 +597,16 @@ function generateWorld(seedStr){
 
   const rng0 = xmur3(seedStr);
   const rand = mulberry32(rng0());
-  // Usa window.generateSurface se world-gen.js sobrescreveu (detectado pela flag)
-  const genSurface = (typeof window !== 'undefined' && window._worldGenPatched)
-    ? window.generateSurface : generateSurface;
-  portalMap[DIM.SURFACE]     = genSurface(rand, rng0);
-  portalMap[DIM.UNDERGROUND] = generateUnderground(rand, rng0);
-  portalMap[DIM.VOID]        = generateVoid(rand, rng0);
+  // A geração de superfície é definida em world-gen.js (window.generateSurface)
+  portalMap[DIM.SURFACE] = window.generateSurface(rand, rng0);
   playerSpawnShip = null;
   antennaStructures = placeStructures(worldGrids[DIM.SURFACE], integrities[DIM.SURFACE], rand);
+  if(typeof spawnAntennaSentries==='function') spawnAntennaSentries();
   antennasActive = 0;
   signalProgress = 0;
   rescueCountdown = -1;
   rescueShip = null;
-  for(const d of [DIM.SURFACE,DIM.UNDERGROUND,DIM.VOID]){
+  for(const d of [DIM.SURFACE]){
     chunkDirtyBuffers[d].fill(1);
     flowFields[d].fill(Infinity);
   }
@@ -999,16 +620,17 @@ function _loadImportedMap(data){
     if(data.worldW) WORLD_W=data.worldW;
     if(data.worldH) WORLD_H=data.worldH;
     initWorldBuffers();
-    for(const d of [DIM.SURFACE,DIM.UNDERGROUND,DIM.VOID]){
+    for(const d of [DIM.SURFACE]){
       if(data.grids&&data.grids[d]){
         const arr=new Uint8Array(data.grids[d]);
         worldGrids[d].set(arr.slice(0,worldGrids[d].length));
       }
     }
     antennaStructures=data.antennas||[];
+    if(typeof spawnAntennaSentries==='function') spawnAntennaSentries();
     antennasActive=0; signalProgress=0;
     rescueCountdown=-1; rescueShip=null;
-    for(const d of [DIM.SURFACE,DIM.UNDERGROUND,DIM.VOID]){
+    for(const d of [DIM.SURFACE]){
       chunkDirtyBuffers[d].fill(1);
       flowFields[d].fill(Infinity);
     }
@@ -1028,8 +650,6 @@ function exportCurrentMap(){
     seed:seedStr, mode:gameMode,
     grids:{
       [DIM.SURFACE]: Array.from(worldGrids[DIM.SURFACE]),
-      [DIM.UNDERGROUND]: Array.from(worldGrids[DIM.UNDERGROUND]),
-      [DIM.VOID]: Array.from(worldGrids[DIM.VOID]),
     },
     antennas: antennaStructures.map(a=>({tx:a.tx,ty:a.ty,active:a.active,label:a.label})),
   };
@@ -1054,6 +674,12 @@ function spawnBurst(x,y,col,n=8,speed=2){
     spawnParticle(x,y,Math.cos(a)*s,Math.sin(a)*s,18+Math.random()*12,col,2+Math.random()*2);
   }
 }
+// Raio (px) a partir do qual um orb de XP começa a ser puxado em direção ao
+// jogador. Fora dele o orb fica parado no chão — a atração deixou de ser
+// instantânea/global, agora exige aproximação real. Chips e nós de evolução
+// podem estender esse raio (ver xpRadiusBonus / getUpgradeValue('xpMagnet')).
+const XP_MAGNET_BASE=190;
+
 function spawnXPOrb(x,y,amount){
   const count=Math.min(amount,5);
   const perOrb=Math.max(1,Math.floor(amount/count));
@@ -1070,7 +696,7 @@ function spawnXPOrb(x,y,amount){
 // Retorna a velocidade de atração do XP baseada na idade do orb (em frames a 60fps)
 // Ciclo: 0.5s pausa → burst 1 → 0.5s pausa → burst 3 → 0.5s pausa → burst 4 → repete último
 function xpPullSpeed(xpAge){
-  const fps=60;
+  const fps=30; // 60 ( mudei teste )
   const half=fps*0.5; // 30 frames = 0.5s
   // Sequência de bursts: 1, 3, 4, 4, 4, ...
   const bursts=[1,3,4];
@@ -1096,7 +722,9 @@ function doExplosion(wx, wy, radius, dmg, isEnemy){
       if(e.dead) continue;
       if(dist2(e.x,e.y,wx,wy)<r2){
         const falloff=1-Math.hypot(e.x-wx,e.y-wy)/radius;
-        e.hp-=dmg*falloff; e.flashTimer=12;
+        const explDmg=dmg*falloff;
+        e.hp-=explDmg; e.flashTimer=12;
+        if(typeof rogueOnEnemyDamaged==='function') rogueOnEnemyDamaged(explDmg);
         if(e.hp<=0&&!e.dead){
           e.dead=true;
           // XP vem apenas dos orbs
@@ -1115,9 +743,7 @@ function doExplosion(wx, wy, radius, dmg, isEnemy){
         if(dist2(ntx*TILE+TILE/2,nty*TILE+TILE/2,wx,wy)>r2*1.1) continue;
         const t=getTile(ntx,nty);
         if(DESTROYABLE.has(t)){
-          const floorTile = currentDim===DIM.UNDERGROUND ? T.CAVE_FLOOR :
-                            currentDim===DIM.VOID ? T.VOID_FLOOR : T.GRASS;
-          if(!isEnemy && typeof spawnBlockDrop==='function') spawnBlockDrop(ntx,nty,t);
+          const floorTile = T.GRASS;
           setTile(ntx,nty,floorTile); score+=1;
         }
       }
@@ -1146,10 +772,20 @@ const ENEMY_TYPES = {
   BOMBER:  {hp:45,  speed:1.3, dmg:35, color:'#f59e0b', size:12, score:35, flying:false, xp:50},
   SWARM:   {hp:12,  speed:2.5, dmg:4,  color:'#22d3ee', size:6,  score:5,  flying:true,  xp:8},
   ELITE:   {hp:300, speed:1.2, dmg:35, color:'#dc2626', size:20, score:100,flying:false, xp:200, elite:true},
-  VOID_SHADE:{hp:80,speed:2.0, dmg:15, color:'#7c3aed', size:13, score:50, flying:true,  xp:80,  voidOnly:true},
-  CRYSTAL_GOLEM:{hp:250,speed:0.6,dmg:40,color:'#a78bfa',size:22,score:80, flying:false, xp:150, underground:true},
   NECRO:   {hp:60,  speed:1.5, dmg:8,  color:'#6d28d9', size:12, score:40, flying:false, xp:60, summoner:true},
 };
+
+// ─── Chefes (a cada BOSS_WAVE_INTERVAL ondas) ─────────────────
+// Cada arquétipo tem uma cor, um padrão de ataque especial (ver
+// bossSpecialAttack em ai-enemy.js) e um perfil de comportamento (role)
+// reaproveitado do sistema de grupo em ai-enemy.js.
+const BOSS_ARCHETYPES = [
+  { type:'BOSS_SENTINEL', name:'SENTINELA PRIMÁRIA', color:'#dc2626', pattern:'charge', role:'tank',   flying:false },
+  { type:'BOSS_REAPER',   name:'CEIFADOR DO VAZIO',   color:'#a855f7', pattern:'ring',   role:'leader', flying:true  },
+  { type:'BOSS_COLOSSUS', name:'COLOSSO DE FERRO',    color:'#b45309', pattern:'summon', role:'leader', flying:false },
+];
+let activeBoss = null;          // referência ao chefe vivo atual (para o HUD de vida no topo)
+let _lastBossArchetypeIdx = -1; // evita repetir o mesmo arquétipo duas vezes seguidas
 
 // ─── Weapon Types ────────────────────────────────────────────
 const WEAPONS = {
@@ -1211,8 +847,8 @@ const SKILL_TREE = {
   // ══ ESPECIAL ══════════════════════════════════════════════
   scannerRange:{ label:'🔍 Scanner+2',  icon:'🔍',parent:null,       category:'special', effect:'scannerRange' },
   scannerRange2:{label:'🔍 Scanner+2',  icon:'🔍',parent:'scannerRange',category:'special',effect:'scannerRange' },
-  lootBonus:  { label:'💰 Loot+15%',   icon:'💰', parent:null,       category:'special', effect:'lootBonus' },
-  lootBonus2: { label:'💰 Loot+15%',   icon:'💰', parent:'lootBonus',category:'special', effect:'lootBonus' },
+  lootBonus:  { label:'🧲 Ímã de XP+40px',icon:'🧲', parent:null,       category:'special', effect:'xpMagnet' },
+  lootBonus2: { label:'🧲 Ímã de XP+40px',icon:'🧲', parent:'lootBonus',category:'special', effect:'xpMagnet' },
   xpBonus:    { label:'📚 XP+10%',     icon:'📚', parent:null,       category:'special', effect:'xpBonus' },
   xpBonus2:   { label:'📚 XP+10%',     icon:'📚', parent:'xpBonus',  category:'special', effect:'xpBonus' },
 };
@@ -1254,13 +890,13 @@ const XP_CURVE = [0,100,200,350,550,800,1100,1500,2000,2600,3300,4200,5500,7000,
 function xpForLevel(lvl){ return XP_CURVE[Math.min(lvl-1, XP_CURVE.length-1)] || lvl*800; }
 
 function gainXP(amount){
-  // Bônus por dimensão
-  if(currentDim===DIM.UNDERGROUND) amount = Math.floor(amount*1.4);
-  if(currentDim===DIM.VOID)        amount = Math.floor(amount*1.8);
-  
   // Bônus de upgrade XP
   const xpBonus = getUpgradeValue('xpBonus');
   amount = Math.floor(amount * xpBonus);
+
+  // Bônus de chip roguelike (ver 'xp_gain_up' em roguelike.js)
+  const rm=(typeof ROGUE!=='undefined' && ROGUE.mods) ? ROGUE.mods : null;
+  if(rm) amount = Math.floor(amount * (rm.xpGainMult||1));
 
   evolution.xp += amount;
   evolution.totalXP += amount;
@@ -1279,9 +915,10 @@ function gainXP(amount){
 }
 
 function applyPassiveBonuses(){
-  robot.maxHp     = 100 + countEffect('maxHp')     * 25;
-  robot.maxEnergy = 100 + countEffect('maxEnergy') * 20;
-  robot.maxHeat   = 100 + countEffect('heatRes')   * 20;
+  const rm = (typeof ROGUE!=='undefined' && ROGUE.mods) ? ROGUE.mods : null;
+  robot.maxHp     = 100 + countEffect('maxHp')     * 25 + (rm ? rm.maxHpBonus     : 0);
+  robot.maxEnergy = 100 + countEffect('maxEnergy') * 20 + (rm ? rm.maxEnergyBonus : 0);
+  robot.maxHeat   = 100 + countEffect('heatRes')   * 20 + (rm ? rm.maxHeatBonus   : 0);
   if(typeof SCANNER !== 'undefined'){
     SCANNER.scanRange = 3 + countEffect('scannerRange') * 2;
   }
@@ -1289,17 +926,20 @@ function applyPassiveBonuses(){
 
 function getUpgradeValue(key){
   const n = countEffect(key);
+  // Modificadores concedidos pelos chips do sistema roguelike (ver roguelike.js).
+  // Ficam sempre em 1 (neutro) / 0 (neutro) quando nenhum chip relevante foi escolhido.
+  const rm = (typeof ROGUE!=='undefined' && ROGUE.mods) ? ROGUE.mods : null;
   switch(key){
-    case 'laserDmg':    return 1 + n * 0.20;
-    case 'energyRegen': return 0.18 * (1 + n * 0.50);
-    case 'armor':       return 1 - n * 0.10;
+    case 'laserDmg':    return (1 + n * 0.20) * (rm ? rm.dmgMult : 1);
+    case 'energyRegen': return 0.18 * (1 + n * 0.50) * (rm ? rm.energyRegenMult : 1);
+    case 'armor':       return (1 - n * 0.10) * (rm ? rm.armorMult : 1);
     case 'buildRange':  return BUILD_RANGE + n * 40;
-    case 'blastRadius': return 1 + n * 0.20;
-    case 'regen':       return n * 0.05;
-    case 'speed':       return 1 + n * 0.10;
-    case 'critChance':  return n * 0.05;
-    case 'critMult':    return 1 + n * 0.25;
-    case 'lootBonus':   return 1 + n * 0.15;
+    case 'blastRadius': return (1 + n * 0.20) * (rm ? rm.blastMult : 1);
+    case 'regen':       return n * 0.05 + (rm ? rm.regenBonus : 0);
+    case 'speed':       return (1 + n * 0.10) * (rm ? rm.speedMult : 1);
+    case 'critChance':  return n * 0.05 + (rm ? rm.critChanceBonus : 0);
+    case 'critMult':    return 1 + n * 0.25 + (rm ? rm.critMultBonusAdd : 0);
+    case 'xpMagnet':    return n * 40; // px extras no raio de atração magnética dos orbs de XP
     case 'xpBonus':     return 1 + n * 0.10;
     default: return 1;
   }
@@ -1345,8 +985,7 @@ function findClearSpawn(startTX, startTY, doCarve){
   }
   // Emergência: escavar espaço 3×3 ao redor do ponto de spawn
   const etx=clamp(startTX,2,WORLD_W-3), ety=clamp(startTY,2,WORLD_H-3);
-  const floorTile = currentDim===DIM.UNDERGROUND ? T.CAVE_FLOOR :
-                    currentDim===DIM.VOID ? T.VOID_FLOOR : T.GRASS;
+  const floorTile = T.GRASS;
   for(let dx=-1;dx<=1;dx++)
     for(let dy=-1;dy<=1;dy++)
       if(inBounds(etx+dx,ety+dy) && SOLID.has(getTile(etx+dx,ety+dy)))
@@ -1380,6 +1019,67 @@ function spawnEnemy(type,tx,ty,scaleMult=1){
   enemies.push(e);
 }
 
+// ─── Boss System ─────────────────────────────────────────────
+// Chamado por startWave() a cada BOSS_WAVE_INTERVAL ondas. Constrói o chefe
+// diretamente (não usa ENEMY_TYPES/spawnEnemy — precisa de ajuste fino próprio)
+// e o insere no array `enemies`, reaproveitando toda a pipeline existente de
+// movimento, tiro, colisão e desenho.
+function spawnBoss(waveNum){
+  const tier = Math.max(1, Math.floor(waveNum / BOSS_WAVE_INTERVAL)); // 1,2,3...
+
+  let idx;
+  do{ idx = Math.floor(Math.random()*BOSS_ARCHETYPES.length); }
+  while(idx===_lastBossArchetypeIdx && BOSS_ARCHETYPES.length>1);
+  _lastBossArchetypeIdx = idx;
+  const arch = BOSS_ARCHETYPES[idx];
+
+  // Chefes escalam mais forte que mobs comuns (ver "profundidade" em startWave)
+  const scaleMult = 1 + (tier-1)*0.55;
+
+  const robTX=Math.floor(robot.x/TILE), robTY=Math.floor(robot.y/TILE);
+  const ang=Math.random()*Math.PI*2, dist=22;
+  const tx=clamp(Math.round(robTX+Math.cos(ang)*dist),2,WORLD_W-3);
+  const ty=clamp(Math.round(robTY+Math.sin(ang)*dist),2,WORLD_H-3);
+  const {tx:ctx2,ty:cty2}=findClearSpawn(tx,ty);
+
+  const baseHp = 650 + tier*380;
+  const e = {
+    id:_nextEnemyId++, type:arch.type, x:ctx2*TILE+TILE/2, y:cty2*TILE+TILE/2,
+    vx:0, vy:0,
+    hp:baseHp*scaleMult, maxHp:baseHp*scaleMult,
+    speed: arch.pattern==='ring' ? 1.7 : 1.05,
+    dmg:(26+tier*4)*scaleMult,
+    col:arch.color, size:34+Math.min(tier,6)*2,
+    score:Math.ceil(350*scaleMult), xp:Math.ceil(420*scaleMult),
+    flying:!!arch.flying, elite:true, boss:true,
+    bossName:arch.name, bossPattern:arch.pattern, role:arch.role,
+    shootCooldown:70, angle:0, flashTimer:0, dead:false,
+    slowTimer:0, stuckTimer:0, lastTX:-1, lastTY:-1,
+    _bossSpecialTimer:0, bossSpecialCD: Math.max(150, 300-tier*12),
+  };
+  enemies.push(e);
+  activeBoss = e;
+
+  showAlert(`☠ ${arch.name} APARECEU!`);
+  if(typeof ariaSpeak==='function') ariaSpeak('bossWarning', true);
+  spawnBurst(e.x,e.y,'#ef4444',30,5);
+  spawnBurst(e.x,e.y,arch.color,20,4);
+  return e;
+}
+
+// Chamado por ai-enemy.js no exato frame em que um chefe é removido do array
+// `enemies` (já com e.dead=true). Dá a recompensa/celebração EXTRA — a recompensa
+// base (score/xp do inimigo) já foi concedida por quem o matou (projétil, bioma,
+// armadilha etc.), então aqui só somamos o bônus e disparamos a comemoração.
+function onBossDefeated(e){
+  score += 500;
+  showAlert(`☠ ${e.bossName||'CHEFE'} DERROTADO! +500 pontos`);
+  spawnBurst(e.x,e.y,'#facc15',40,6);
+  spawnBurst(e.x,e.y,e.col,30,5);
+  spawnBurst(e.x,e.y,'#fff',16,4);
+  if(activeBoss===e) activeBoss=null;
+}
+
 // ─── Game State ──────────────────────────────────────────────
 const robot = {
   x:0, y:0, vx:0, vy:0,
@@ -1396,7 +1096,35 @@ const cam  = {x:0,y:0};
 const keys = {};
 
 let time=0, last=0, running=false;
+
+// ─── Sistema de Pause ──────────────────────────────────────────
+// Motivos empilháveis (Set): 'manual' (botão/tecla P),
+// 'upgrade', 'roguelike' (tela de escolha de chip pós-onda).
+// O jogo só executa update() quando pauseReasons está vazio; draw()
+// continua rodando para manter a cena visível (congelada) atrás dos
+// painéis. Usar um Set em vez de um boolean evita que fechar um painel
+// "destrave" o pause aberto por outro motivo (ex: pausar manualmente
+// e depois abrir/fechar a árvore de evolução não deve despausar o jogo).
+const pauseReasons = new Set();
+function addPause(reason){ pauseReasons.add(reason); }
+function removePause(reason){ pauseReasons.delete(reason); }
+function isPaused(){ return pauseReasons.size>0; }
+function togglePause(){
+  if(!running) return;
+  if(pauseReasons.has('manual')) removePause('manual');
+  else addPause('manual');
+}
+
 let wave=0, waveTimer=0, waveSpawnLeft=0;
+
+// ── Aviso de Chefe (a cada 5 ondas) ────────────────────────────
+// O banner/fala da ARIA dispara aqui; a entidade do chefe em si é criada por
+// spawnBoss() (ver "Boss System" acima), enfileirada em startWave() para
+// aparecer logo após o banner terminar (ver BOSS_WARNING_DURATION abaixo).
+const BOSS_WAVE_INTERVAL = 5;
+const BOSS_WARNING_DURATION = 260; // ~4.3s a 60fps
+let bossWarningTimer = 0;   // >0 enquanto o banner de aviso está visível
+let bossWarningWave  = 0;   // número da onda que disparou o aviso atual
 let score=0;
 let mouseWorld={x:0,y:0};
 let mouseDown=false;
@@ -1420,6 +1148,14 @@ const minimapCanvas=document.getElementById('minimapCanvas');
 const mctx=minimapCanvas?minimapCanvas.getContext('2d'):null;
 let W=0,H=0,DPR=Math.min(window.devicePixelRatio||1,2);
 
+// ─── Sprites (aparência de UNIDADE-7, nave de resgate e antenas) ──
+const SPRITES = {
+  player:  Object.assign(new Image(), {src:'assets/player.png'}),
+  ship:    Object.assign(new Image(), {src:'assets/ship.png'}),
+  antenna: Object.assign(new Image(), {src:'assets/antenna.png'}),
+};
+function spriteReady(img){ return img && img.complete && img.naturalWidth>0; }
+
 function resize(){
   W=canvas.clientWidth; H=canvas.clientHeight;
   canvas.width=Math.floor(W*DPR); canvas.height=Math.floor(H*DPR);
@@ -1435,6 +1171,18 @@ window.addEventListener('resize',resize);resize();
 window.addEventListener('keydown',e=>{
   keys[e.key.toLowerCase()]=true;
   if([' ','arrowup','arrowdown'].includes(e.key.toLowerCase())) e.preventDefault();
+
+  // Pause manual — funciona mesmo com outros painéis abertos/fechados
+  if(e.key==='p'||e.key==='P'){ togglePause(); return; }
+
+  // Painéis / menus: sempre respondem, mesmo em pause, pois são eles
+  // mesmos que controlam o motivo 'upgrade'/'roguelike' do pause.
+  if(e.key==='u') showUpgradePanel();
+  if(e.key==='Escape') closeUpgradePanel();
+
+  // Ações de gameplay (mundo) — bloqueadas enquanto o jogo estiver
+  // pausado por qualquer motivo (manual, upgrade, roguelike).
+  if(isPaused()) return;
   if(e.key==='1') setWeapon('LASER');
   if(e.key==='2') setWeapon('SHOTGUN');
   if(e.key==='3') setWeapon('PLASMA');
@@ -1446,19 +1194,8 @@ window.addEventListener('keydown',e=>{
   if(e.key==='e') setTool('build');
   if(e.key==='r') setTool('destroy');
   if(e.key==='b') cycleBuildType();
-  if(e.key==='u') showUpgradePanel();
-  if(e.key==='Escape') closeUpgradePanel();
   if(e.key==='f'||e.key==='F') tryTeleport();
   if(e.key==='v'||e.key==='V') { if(typeof toggleARIANav==='function') toggleARIANav(); }
-  if(e.key==='i'||e.key==='I') { if(typeof toggleInventory==='function') toggleInventory(); }
-  if(e.key==='c'||e.key==='C') { if(typeof tryPlayerCraft==='function') tryPlayerCraft(); }
-  if(e.key==='t'||e.key==='T') { if(typeof useHotbarItem==='function') useHotbarItem(); }
-  // ADIÇÃO: descarte de item — necessário para o jogador conseguir liberar
-  // espaço depois do aviso de "inventário cheio" (ver BUG FIX em systems.js).
-  // X descarta 1 unidade do slot sob o mouse; Shift+X descarta a pilha toda.
-  if((e.key==='x'||e.key==='X') && typeof invUI!=='undefined' && invUI.open && invUI.hoverSlot>=0){
-    if(typeof discardFromInventory==='function') discardFromInventory(invUI.hoverSlot, e.shiftKey);
-  }
 });
 window.addEventListener('keyup',e=>{ keys[e.key.toLowerCase()]=false; });
 
@@ -1466,27 +1203,13 @@ canvas.addEventListener('mousemove',e=>{
   const r=canvas.getBoundingClientRect();
   mouseWorld.x=(e.clientX-r.left-W/2)+cam.x;
   mouseWorld.y=(e.clientY-r.top -H/2)+cam.y;
-  // Update hover slot in inventory
-  if(typeof invUI!=='undefined' && invUI.open){
-    invUI.hoverSlot=-1;
-    const mx=e.clientX-r.left, my=e.clientY-r.top;
-    for(let i=0;i<(invUI._slotBounds||[]).length;i++){
-      const b=invUI._slotBounds[i];
-      if(b && mx>=b.sx&&mx<=b.sx+b.w&&my>=b.sy&&my<=b.sy+b.h) invUI.hoverSlot=i;
-    }
-  }
 });
-canvas.addEventListener('mousedown',e=>{ if(e.button===0) mouseDown=true; });
+canvas.addEventListener('mousedown',e=>{ if(e.button===0 && !isPaused()) mouseDown=true; });
 canvas.addEventListener('mouseup',  e=>{ if(e.button===0) mouseDown=false; });
-canvas.addEventListener('contextmenu',e=>{ e.preventDefault(); cycleBuildType(); });
+canvas.addEventListener('contextmenu',e=>{ e.preventDefault(); if(!isPaused()) cycleBuildType(); });
 canvas.addEventListener('wheel',e=>{
   e.preventDefault();
-  if(typeof invUI!=='undefined' && invUI.open){
-    if(typeof handleInventoryScroll==='function') handleInventoryScroll(Math.sign(e.deltaY));
-  } else {
-    // Ciclar hotbar com scroll
-    INVENTORY.selected=(INVENTORY.selected+Math.sign(e.deltaY)+10)%10;
-  }
+  if(!isPaused()) cycleWeapon(Math.sign(e.deltaY));
 },{passive:false});
 
 // ─── Desktop only — mobile removido ──────────────────────────
@@ -1550,12 +1273,21 @@ function setWeapon(w){
   currentWeapon=w;
 }
 
+// Cicla para a próxima/anterior arma já desbloqueada (usado pelo scroll do mouse)
+const WEAPON_ORDER=['LASER','SHOTGUN','PLASMA','ROCKET','GRENADE','RAILGUN','CHAIN'];
+function cycleWeapon(dir){
+  const unlocked=WEAPON_ORDER.filter(w=>WEAPONS[w].unlockLevel<=evolution.level);
+  if(unlocked.length<=1) return;
+  const idx=unlocked.indexOf(currentWeapon);
+  const next=unlocked[(idx+dir+unlocked.length)%unlocked.length];
+  currentWeapon=next;
+}
+
 // ─── HUD refs ────────────────────────────────────────────────
 const hud         = document.getElementById('hud');
 const menuScreen  = document.getElementById('menuScreen');
 const endScreen   = document.getElementById('endScreen');
 const biomeTag    = document.getElementById('biomeTag');
-const caveOverlay = document.getElementById('caveOverlay');
 const seedInput   = document.getElementById('seedInput');
 const barHealth   = document.getElementById('barHealth');
 const barEnergy   = document.getElementById('barEnergy');
@@ -1599,6 +1331,11 @@ function updateHUD(){
   if(dayHUD) dayHUD.textContent='';
   if(biomeTimer>0){biomeTimer--;}else{if(biomeTag)biomeTag.classList.remove('show');}
   if(alertTimer>0){alertTimer--;}else{if(hudAlert)hudAlert.classList.remove('show');}
+  if(typeof btnPause!=='undefined' && btnPause){
+    const p=isPaused();
+    btnPause.textContent = p ? '▶ Retomar' : '⏸ Pause';
+    btnPause.classList.toggle('btn-pause-active', p);
+  }
 }
 
 // ─── Upgrade Panel (Canvas UI) ───────────────────────────────
@@ -1607,10 +1344,12 @@ let upgradePanel = null; // dados do painel
 function showUpgradePanel(){
   if(!running) return;
   upgradeOpen = true;
+  addPause('upgrade');
 }
 function closeUpgradePanel(){
   upgradeOpen = false;
   upgradePanel = null;
+  removePause('upgrade');
 }
 
 function drawUpgradePanel(){
@@ -1756,11 +1495,10 @@ function drawUpgradePanel(){
 canvas.addEventListener('click', e=>{
   const r=canvas.getBoundingClientRect();
   const mx=e.clientX-r.left, my=e.clientY-r.top;
-  // Clique no inventário
-  if(typeof invUI!=='undefined' && invUI.open){
-    if(typeof handleInventoryClick==='function'){
-      if(handleInventoryClick(mx,my)) return;
-    }
+  // Clique na tela de escolha de chip roguelike (prioridade máxima)
+  if(typeof ROGUE!=='undefined' && ROGUE.screenOpen){
+    if(typeof rogueHandleClick==='function') rogueHandleClick(mx,my);
+    return;
   }
   if(!upgradeOpen||!upgradePanel) return;
   if(upgradePanel.cells){
@@ -1786,101 +1524,18 @@ canvas.addEventListener('click', e=>{
   }
 });
 
-// ─── Dimension Switch ────────────────────────────────────────
-function switchDimension(targetDim, targetTX, targetTY){
-  if(portalCooldown>0) return;
-  currentDim = targetDim;
-  // Atualizar aliases para a nova dimensão
-  flowField  = flowFields[currentDim];
-  dirField   = dirFields[currentDim];
-  chunkDirty = chunkDirtyBuffers[currentDim];
-  chunkDirty.fill(1);
-  minimapDirty = true;
-  enemies.length = 0;
-  spawnQueue.length = 0;
-
-  // Encontrar spawn no novo mundo
-  const sp = findClearSpawn(targetTX||Math.floor(WORLD_W/2), targetTY||Math.floor(WORLD_H/2), true);
-  robot.x = (sp.tx+0.5)*TILE;
-  robot.y = (sp.ty+0.5)*TILE;
-  cam.x=robot.x; cam.y=robot.y;
-
-  // Reset flow field
-  rebuildFlowField(sp.tx, sp.ty);
-
-  // Garantir que portais de saída estão a ≥5 blocos do spawn
-  // (evita o jogador piscar de volta para a dimensão anterior imediatamente)
-  const MIN_PORTAL_DIST = 5;
-  for(const p of portalMap[currentDim]){
-    const dist = Math.max(Math.abs(p.tx-sp.tx), Math.abs(p.ty-sp.ty));
-    if(dist < MIN_PORTAL_DIST){
-      // Reposicionar esse portal para longe do spawn
-      // Apagar o portal na posição antiga
-      const curTile = worldGrids[currentDim][wi(p.tx,p.ty)];
-      if(curTile === T.PORTAL){
-        const floorT = currentDim===DIM.UNDERGROUND ? T.CAVE_FLOOR :
-                       currentDim===DIM.VOID ? T.VOID_FLOOR : T.GRASS;
-        worldGrids[currentDim][wi(p.tx,p.ty)] = floorT;
-      }
-      // Encontrar nova posição a ≥5 blocos
-      let placed=false;
-      for(let r=MIN_PORTAL_DIST;r<=30&&!placed;r++){
-        for(let angle=0;angle<16&&!placed;angle++){
-          const a = (angle/16)*Math.PI*2;
-          const ntx=clamp(sp.tx+Math.round(Math.cos(a)*r),2,WORLD_W-3);
-          const nty=clamp(sp.ty+Math.round(Math.sin(a)*r),2,WORLD_H-3);
-          const nt=worldGrids[currentDim][wi(ntx,nty)];
-          if(isClearTile(nt)){
-            worldGrids[currentDim][wi(ntx,nty)]=T.PORTAL;
-            p.tx=ntx; p.ty=nty;
-            placed=true;
-            minimapDirty=true;
-          }
-        }
-      }
-    }
-  }
-
-  portalCooldown = 180; // 3 segundos de cooldown
-
-  const dimBonus = currentDim===DIM.VOID ? ' [XP x1.8]' : currentDim===DIM.UNDERGROUND ? ' [XP x1.4]' : '';
-  showAlert(DIM_NAMES[currentDim] + dimBonus);
-  spawnBurst(robot.x, robot.y, '#a78bfa', 30, 6);
-
-  // Escurecer tela (flash de transição de dimensão)
-  if(caveOverlay){
-    caveOverlay.classList.remove('active');
-    void caveOverlay.offsetWidth; // force reflow para reiniciar animação
-    caveOverlay.classList.add('active');
-    clearTimeout(caveOverlay._fadeTimer);
-    caveOverlay._fadeTimer = setTimeout(()=>caveOverlay.classList.remove('active'), 600);
-  }
-}
-
+// ─── Interação com Portal (exclusiva das antenas de resgate) ──
 function checkPortalInteraction(){
   if(portalCooldown>0) return;
   const tx=Math.floor(robot.x/TILE), ty=Math.floor(robot.y/TILE);
   const tile=getTile(tx,ty);
   if(tile===T.PORTAL){
-    // Verificar se é uma antena de resgate primeiro
-    if(currentDim===DIM.SURFACE){
-      for(const ant of antennaStructures){
-        if(!ant.active && Math.abs(ant.tx-tx)<=1 && Math.abs(ant.ty-ty)<=1){
-          activateAntenna(ant);
-          return;
-        }
-      }
-    }
-    // Achar qual portal e destino
-    const portals = portalMap[currentDim];
-    for(const p of portals){
-      if(Math.abs(p.tx-tx)<=1 && Math.abs(p.ty-ty)<=1){
-        switchDimension(p.targetDim, Math.floor(WORLD_W/2), Math.floor(WORLD_H/2));
+    for(const ant of antennaStructures){
+      if(!ant.active && Math.abs(ant.tx-tx)<=1 && Math.abs(ant.ty-ty)<=1){
+        activateAntenna(ant);
         return;
       }
     }
-    // Portal sem mapeamento: vai pro subsolo por padrão
-    switchDimension(currentDim===DIM.SURFACE ? DIM.UNDERGROUND : DIM.SURFACE);
   }
 }
 
@@ -1991,6 +1646,12 @@ function activateAntenna(ant){
   spawnBurst(ant.tx*TILE+TILE/2, ant.ty*TILE+TILE/2, '#00e5ff', 20, 4);
   score += 500;
 
+  // Sentinelas daquela antena ficam dormentes (param de atirar) — a antena já
+  // foi conquistada, não faz sentido continuarem hostis para sempre.
+  if(typeof sentries!=='undefined'){
+    for(const s of sentries){ if(s.ant===ant && !s.dead) s.dormant=true; }
+  }
+
   if(typeof ariaOnAntenna==='function') ariaOnAntenna();
   if(antennasActive >= TOTAL_ANTENNAS){
     // Todas antenas ativas: iniciar contagem regressiva para nave de resgate
@@ -2004,6 +1665,99 @@ function activateAntenna(ant){
     showAlert(`📡 ANTENA ${ant.label} ATIVA! (${antennasActive}/${TOTAL_ANTENNAS})`);
   }
   minimapDirty = true;
+}
+
+// ─── Sentinelas de Antena ──────────────────────────────────────
+// Torretas fixas que guardam cada antena de resgate. Ficam num array próprio
+// (`sentries`), separado de `enemies` — ou seja, NÃO contam para a detecção
+// de "onda limpa", não aparecem no contador de onda e não são afetadas pela
+// IA de grupo dos inimigos comuns. São só obstáculos destrutíveis que dão
+// uma recompensa pequena ao serem quebradas.
+const sentries = [];
+const SENTRIES_PER_ANTENNA = 2;
+const SENTRY_HP   = 150;
+const SENTRY_DMG  = 13;
+const SENTRY_RANGE = 380;
+
+function spawnSentry(tx, ty, ant){
+  const {tx:ctx3,ty:cty3} = findClearSpawn(tx, ty);
+  sentries.push({
+    id:_nextEnemyId++, ant,
+    x:ctx3*TILE+TILE/2, y:cty3*TILE+TILE/2,
+    hp:SENTRY_HP, maxHp:SENTRY_HP, dmg:SENTRY_DMG, size:15,
+    shootCooldown:Math.random()*60|0, angle:0, flashTimer:0,
+    dead:false, dormant:false, col:'#facc15',
+  });
+}
+
+// Distribui as sentinelas em anel ao redor de cada antena. Chamada sempre que
+// antennaStructures é (re)definido — geração normal ou mapa importado.
+function spawnAntennaSentries(){
+  sentries.length = 0;
+  if(gameMode===GAME_MODES.CREATIVE) return; // criativo: sem combate
+  for(const ant of antennaStructures){
+    const ringR = (ant.r||6) + 3;
+    const baseAngle = Math.random()*Math.PI*2;
+    for(let k=0;k<SENTRIES_PER_ANTENNA;k++){
+      const a = baseAngle + (Math.PI*2/SENTRIES_PER_ANTENNA)*k;
+      const stx = Math.round(ant.tx + Math.cos(a)*ringR);
+      const sty = Math.round(ant.ty + Math.sin(a)*ringR);
+      spawnSentry(stx, sty, ant);
+    }
+  }
+}
+
+function updateSentries(){
+  for(let i=sentries.length-1;i>=0;i--){
+    const s=sentries[i];
+    if(s.dead){ sentries.splice(i,1); continue; }
+    if(s.flashTimer>0) s.flashTimer--;
+    if(s.shootCooldown>0) s.shootCooldown--;
+    if(s.dormant) continue; // antena já conquistada — não atira mais
+
+    const dx=robot.x-s.x, dy=robot.y-s.y;
+    const d=Math.sqrt(dx*dx+dy*dy)||1;
+    s.angle=Math.atan2(dy,dx);
+    if(d>=SENTRY_RANGE || s.shootCooldown>0) continue;
+    if(typeof hasLineOfSight==='function' && !hasLineOfSight(s.x,s.y,robot.x,robot.y)) continue;
+    spawnProjectile(s.x,s.y,robot.x,robot.y,'enemy',true);
+    s.shootCooldown = 55;
+  }
+}
+
+function drawSentries(){
+  for(const s of sentries){
+    if(s.dead) continue;
+    const sx=s.x-cam.x+W/2, sy=s.y-cam.y+H/2;
+    if(sx<-40||sx>W+40||sy<-40||sy>H+40) continue;
+    ctx.save(); ctx.translate(sx,sy);
+    const col=s.flashTimer>0 ? '#fff' : (s.dormant ? '#4b5563' : s.col);
+
+    ctx.globalAlpha=0.2; ctx.fillStyle='#000';
+    ctx.beginPath(); ctx.ellipse(0,s.size+2,s.size*.9,s.size*.4,0,0,Math.PI*2); ctx.fill();
+    ctx.globalAlpha=1;
+
+    // Base
+    ctx.fillStyle='#3f3f46';
+    ctx.beginPath(); ctx.arc(0,0,s.size,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.lineWidth=2; ctx.stroke();
+    // Canhão giratório
+    ctx.rotate(s.angle);
+    ctx.fillStyle=col;
+    ctx.fillRect(0,-3,s.size+7,6);
+    ctx.rotate(-s.angle);
+    ctx.fillStyle=col;
+    ctx.beginPath(); ctx.arc(0,0,s.size*0.55,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+
+    // HP bar
+    if(!s.dormant){
+      const hpF=s.hp/s.maxHp, bw=s.size*2, bh=4;
+      ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.fillRect(sx-bw/2,sy-s.size-10,bw,bh);
+      ctx.fillStyle=hpF>0.5?'#facc15':hpF>0.25?'#fb923c':'#ef4444';
+      ctx.fillRect(sx-bw/2,sy-s.size-10,bw*hpF,bh);
+    }
+  }
 }
 
 // ─── Rescue Ship System ───────────────────────────────────────
@@ -2131,33 +1885,28 @@ function drawRescueShip(){
   // Glow
   ctx.shadowColor = '#00e5ff'; ctx.shadowBlur = 24+pulse*12;
 
-  // Corpo principal (elipse)
-  const bodyGrad = ctx.createRadialGradient(0,-5,2,0,0,22);
-  bodyGrad.addColorStop(0,'#a0ecff');
-  bodyGrad.addColorStop(0.5,'#0099cc');
-  bodyGrad.addColorStop(1,'#004466');
-  ctx.fillStyle = bodyGrad;
-  ctx.beginPath();
-  ctx.ellipse(0,0,14,22,0,0,Math.PI*2);
-  ctx.fill();
+  if(spriteReady(SPRITES.ship)){
+    const dh=46, dw=dh*(SPRITES.ship.naturalWidth/SPRITES.ship.naturalHeight);
+    ctx.drawImage(SPRITES.ship,-dw/2,-dh/2,dw,dh);
+  } else {
+    // Fallback vetorial enquanto o sprite carrega
+    const bodyGrad = ctx.createRadialGradient(0,-5,2,0,0,22);
+    bodyGrad.addColorStop(0,'#a0ecff');
+    bodyGrad.addColorStop(0.5,'#0099cc');
+    bodyGrad.addColorStop(1,'#004466');
+    ctx.fillStyle = bodyGrad;
+    ctx.beginPath();
+    ctx.ellipse(0,0,14,22,0,0,Math.PI*2);
+    ctx.fill();
+    ctx.strokeStyle=`rgba(0,229,255,${0.6+pulse*0.4})`;
+    ctx.lineWidth=2;
+    ctx.beginPath();
+    ctx.ellipse(0,0,14,22,0,0,Math.PI*2);
+    ctx.stroke();
+  }
+  ctx.shadowBlur=0;
 
-  // Borda iluminada
-  ctx.strokeStyle=`rgba(0,229,255,${0.6+pulse*0.4})`;
-  ctx.lineWidth=2;
-  ctx.beginPath();
-  ctx.ellipse(0,0,14,22,0,0,Math.PI*2);
-  ctx.stroke();
-
-  // Janela da cabine
-  ctx.fillStyle=`rgba(200,240,255,${0.7+pulse*0.2})`;
-  ctx.beginPath(); ctx.ellipse(0,-8,5,7,0,0,Math.PI*2); ctx.fill();
-
-  // Asas
-  ctx.fillStyle='#006688';
-  ctx.beginPath(); ctx.moveTo(-14,4); ctx.lineTo(-22,16); ctx.lineTo(-8,10); ctx.closePath(); ctx.fill();
-  ctx.beginPath(); ctx.moveTo(14,4); ctx.lineTo(22,16); ctx.lineTo(8,10); ctx.closePath(); ctx.fill();
-
-  // Motor / thruster
+  // Motor / thruster (glow extra sobre o sprite)
   if(rs.phase!=='landed'){
     ctx.shadowColor='#f97316'; ctx.shadowBlur=20+pulse*15;
     ctx.fillStyle=`rgba(249,115,22,${0.6+pulse*0.4})`;
@@ -2236,7 +1985,7 @@ function drawRescueCountdownHUD(){
 }
 
 function drawAntennaHUD(){
-  if(!running || currentDim !== DIM.SURFACE) return;
+  if(!running) return;
   // Mostrar antenas mais próximas no canto
   const sorted = [...antennaStructures].filter(a=>!a.active).sort((a,b)=>{
     return Math.hypot(a.tx*TILE-robot.x, a.ty*TILE-robot.y) -
@@ -2302,13 +2051,22 @@ function startWave(){
   wave++;
   const defIdx = Math.min(wave-1, WAVE_DEFS.length-1);
   const def = WAVE_DEFS[defIdx];
-  // Multiplicador de escala crescente mas suave: começa em 1, cresce ~0.2 por ciclo
+  const spawnRealBoss = (wave % BOSS_WAVE_INTERVAL === 0);
+
+  // ── "Profundidade": em vez de simplesmente empilhar mais inimigos a cada
+  // ciclo, a contagem cresce pouco (e no fim até encolhe um pouco) enquanto
+  // o poder individual (scaleMult) cresce mais rápido. Resultado: com o tempo
+  // aparecem MENOS inimigos por onda, porém cada um mais forte — a dificuldade
+  // sobe pela qualidade dos inimigos, não pela quantidade bruta.
+  // Em onda de chefe, a "escolta" de mobs comuns é ainda mais reduzida (40%),
+  // já que a ameaça principal passa a ser o próprio chefe.
   const cycle = Math.floor((wave-1)/WAVE_DEFS.length);
-  const scaleMult = 1 + cycle * 0.25 + (wave/WAVE_DEFS.length) * 0.05;
+  const scaleMult = 1 + cycle * 0.4 + (wave/WAVE_DEFS.length) * 0.08;
+  const countMult = spawnRealBoss ? 0.4 : Math.max(0.55, 1 - cycle * 0.12);
 
   waveSpawnLeft=0;
   for(const e of def.enemies){
-    const count = Math.ceil(e.n * (1 + cycle * 0.3));
+    const count = Math.max(1, Math.round(e.n * countMult));
     for(let i=0;i<count;i++){
       const side=Math.floor(Math.random()*4);
       const robTX=Math.floor(robot.x/TILE);
@@ -2321,32 +2079,120 @@ function startWave(){
       else              {tx=robTX-26;ty=robTY+(Math.random()-.5)*sp|0;}
       tx=clamp(tx,2,WORLD_W-3);
       ty=clamp(ty,2,WORLD_H-3);
-      // Inimigos específicos de dimensão
       let type=e.t;
-      if(e.t==='VOID_SHADE'&&currentDim!==DIM.VOID) type='SPECTER';
-      if(e.t==='CRYSTAL_GOLEM'&&currentDim!==DIM.UNDERGROUND) type='TANK';
       // Usar fila de spawn baseada em frames (evita setTimeout que ignora estado do jogo)
       spawnQueue.push({type, tx, ty, scaleMult, delay: waveSpawnLeft * 17});
       waveSpawnLeft++;
     }
   }
 
-  const isBoss = def.boss;
-  if(isBoss) showAlert(`⚠ INIMIGOS ÉLITE CHEGANDO!`);
+  const isEliteWave = def.boss;
+  if(isEliteWave) showAlert(`⚠ INIMIGOS ÉLITE CHEGANDO!`);
   // Ondas normais: sem aviso no centro da tela
+
+  // ── Onda de chefe a cada BOSS_WAVE_INTERVAL ondas ──────────────
+  // O banner/aviso dispara já; o chefe de verdade entra na fila de spawn com
+  // um atraso que deixa o banner terminar antes dele aparecer em cena.
+  if(spawnRealBoss){
+    if(typeof triggerBossWarning === 'function') triggerBossWarning(wave);
+    spawnQueue.push({ boss:true, delay: BOSS_WARNING_DURATION + 30 });
+  }
 
   // Tempo entre ondas: mais longo no início (resting phase)
   waveTimer = wave<=3 ? 1200 : 900+wave*150;
   autoWaveTimer = 0; // reset ao iniciar onda nova
+
+  if(typeof rogueOnWaveStart==='function') rogueOnWaveStart();
 }
 
-// ─── Robot Physics ───────────────────────────────────────────
+// ─── Aviso de Chefe (a cada 5 ondas) ──────────────────────────
+// Dispara a apresentação de "chefe chegando": banner dramático na tela,
+// alerta no HUD, fala da ARIA e uma rajada de partículas no jogador.
+// O chefe de verdade (entidade, IA, ataques) é criado por spawnBoss(), já
+// enfileirado em startWave() para surgir logo após este banner.
+function triggerBossWarning(waveNum){
+  bossWarningTimer = BOSS_WARNING_DURATION;
+  bossWarningWave = waveNum;
+  showAlert(`☠ CHEFE SE APROXIMA — ONDA ${waveNum}`);
+  if(typeof ariaSpeak==='function') ariaSpeak('bossWarning', true);
+  // Rajada de partículas vermelhas ao redor do robô para reforçar a tensão
+  if(typeof spawnBurst==='function'){
+    spawnBurst(robot.x, robot.y, '#ef4444', 18, 4);
+    spawnBurst(robot.x, robot.y, '#7f1d1d', 10, 2);
+  }
+}
+
+// Desenha o banner de aviso de chefe: título pulsante + contagem regressiva
+// sutil, com fade-in/out. Chamado a partir de draw(), por cima do HUD normal
+// mas abaixo da tela de escolha de chips (que já pausa o jogo).
+function drawBossWarning(){
+  if(bossWarningTimer<=0) return;
+  const t = bossWarningTimer / BOSS_WARNING_DURATION; // 1→0
+  // Fade-in rápido nos primeiros 15%, sustentado, fade-out nos últimos 30%
+  const fadeIn  = Math.min(1, (1-t) / 0.15);
+  const fadeOut = Math.min(1, t / 0.30);
+  const alpha = Math.min(fadeIn, fadeOut);
+  const pulse = 0.5 + 0.5*Math.sin(time*0.35);
+
+  ctx.save();
+  // Vinheta vermelha pulsante nas bordas — mesma técnica do screenEdge() de draw()
+  const cx=W/2, cy=H/2;
+  const grad=ctx.createRadialGradient(cx,cy,Math.min(W,H)*0.32, cx,cy,Math.max(W,H)*0.85);
+  grad.addColorStop(0,'rgba(0,0,0,0)');
+  grad.addColorStop(1,`rgba(180,10,10,${alpha*0.30*(0.6+0.4*pulse)})`);
+  ctx.fillStyle=grad; ctx.fillRect(0,0,W,H);
+
+  // Faixa de fundo do banner
+  const bannerY = H*0.16;
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = 'rgba(10,2,4,0.55)';
+  ctx.fillRect(0, bannerY-26, W, 52);
+  ctx.strokeStyle = `rgba(239,68,68,${0.5+0.5*pulse})`;
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(0, bannerY-26, W, 52);
+
+  // Título
+  ctx.textAlign='center';
+  ctx.shadowColor='rgba(239,68,68,0.8)'; ctx.shadowBlur=14+pulse*10;
+  ctx.fillStyle='#ff3b3b';
+  ctx.font=`bold ${16+Math.round(pulse*2)}px 'Orbitron',sans-serif`;
+  ctx.fillText(`☠ CHEFE SE APROXIMA — ONDA ${bossWarningWave} ☠`, W/2, bannerY+6);
+  ctx.shadowBlur=0;
+
+  ctx.restore();
+}
+
+// ─── HUD de Vida do Chefe (barra no topo da tela) ─────────────
+function drawBossHUD(){
+  if(!activeBoss || activeBoss.dead){ activeBoss=null; return; }
+  const e=activeBoss;
+  const barW=Math.min(420, W*0.55), barH=14;
+  const bx=W/2-barW/2, by=16;
+
+  ctx.save();
+  ctx.textAlign='center';
+  ctx.shadowColor='rgba(239,68,68,0.6)'; ctx.shadowBlur=8;
+  ctx.fillStyle='#ff3b3b'; ctx.font=`bold 12px 'Orbitron',sans-serif`;
+  ctx.fillText(`☠ ${e.bossName||'CHEFE'}`, W/2, by-4);
+  ctx.shadowBlur=0;
+
+  ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(bx,by,barW,barH);
+  const hpF=Math.max(0,e.hp/e.maxHp);
+  const grad=ctx.createLinearGradient(bx,0,bx+barW,0);
+  grad.addColorStop(0,'#7f1d1d'); grad.addColorStop(1,'#ef4444');
+  ctx.fillStyle=grad; ctx.fillRect(bx,by,barW*hpF,barH);
+  ctx.strokeStyle='rgba(255,255,255,0.4)'; ctx.lineWidth=1.5;
+  ctx.strokeRect(bx,by,barW,barH);
+
+  ctx.fillStyle='#fff'; ctx.font=`9px 'Share Tech Mono',monospace`;
+  ctx.fillText(`${Math.ceil(e.hp)} / ${Math.ceil(e.maxHp)}`, W/2, by+barH+12);
+  ctx.restore();
+}
+
+
 function getBiomeAt(tx,ty){
   const t=getTile(tx,ty);
-  const dimBiomes = currentDim===DIM.VOID ? BIOME_INFO.void :
-                    currentDim===DIM.UNDERGROUND ? BIOME_INFO.underground :
-                    BIOME_INFO.surface;
-  return dimBiomes[t] || BIOME_INFO.surface[t] || BIOME_INFO.underground[t] || {name:'Desconhecido',drag:.984};
+  return BIOME_INFO.surface[t] || {name:'Desconhecido',drag:.984};
 }
 
 function updateRobot(dt){
@@ -2367,7 +2213,6 @@ function updateRobot(dt){
   // ── Biomes.js: drag, thrust, maxSpeed via tabela BIOME_FX ─
   const drag = typeof getBiomeDrag==='function' ? getBiomeDrag(tile) : (binfo.drag||0.984);
   const inWater=(tile===T.WATER||tile===T.CORAL||tile===T.DEEP_WATER);
-  const inVoid=(tile===T.AIR&&currentDim===DIM.VOID);
 
   if(Math.hypot(ix,iy)>0.05 && robot.energy>0){
     const thr = typeof getBiomeThrust==='function'
@@ -2375,7 +2220,10 @@ function updateRobot(dt){
       : 0.32*speedBonus;
     robot.vx+=ix*thr; robot.vy+=iy*thr;
     // Modo criativo: sem custo de energia
-    if(gameMode!==GAME_MODES.CREATIVE) robot.energy=Math.max(0,robot.energy-0.035);
+    if(gameMode!==GAME_MODES.CREATIVE){
+      const eDrainMult=(typeof ROGUE!=='undefined' && ROGUE.mods) ? ROGUE.mods.energyDrainMult : 1;
+      robot.energy=Math.max(0,robot.energy-0.035*(eDrainMult||1));
+    }
   }
   robot.vx*=drag; robot.vy*=drag;
 
@@ -2395,11 +2243,9 @@ function updateRobot(dt){
   if(gameMode!==GAME_MODES.CREATIVE){
     // Efeitos de bioma via biomes.js
     if(typeof applyBiomeEffects==='function') applyBiomeEffects(tile);
-    // Void: cair no abismo
-    if(inVoid){
-      robot.hp=Math.max(0,robot.hp-0.5);
-      if(Math.random()<0.1)spawnParticle(robot.x,robot.y,(Math.random()-.5)*2,(Math.random()-.5)*2,20,'#7c3aed',3);
-    }
+    // Dissipação passiva de calor (chip radiador)
+    const passiveHeatDown=(typeof ROGUE!=='undefined' && ROGUE.mods) ? ROGUE.mods.passiveHeatDown : 0;
+    if(passiveHeatDown) robot.heat=Math.max(0,robot.heat-passiveHeatDown);
   }
 
   const regenRate=getUpgradeValue('energyRegen');
@@ -2426,12 +2272,16 @@ function updateRobot(dt){
   cam.x=lerp(cam.x,robot.x,0.08);
   cam.y=lerp(cam.y,robot.y,0.08);
 
-  if(robot.hp<=0&&gameMode!==GAME_MODES.CREATIVE){robot.dead=true;endGame(false);}
+  if(robot.hp<=0&&gameMode!==GAME_MODES.CREATIVE){
+    if(!(typeof rogueTryEmergencyShield==='function' && rogueTryEmergencyShield())){
+      robot.dead=true;endGame(false);
+    }
+  }
 
   if(spd>0.5&&(time%2<1)){
     const ang=robot.angle+Math.PI;
     const fx2=typeof getBiomeFX==='function'?getBiomeFX(tile):null;
-    const tc=fx2?fx2.trailCol:(currentDim===DIM.VOID?'#a78bfa':inWater?'#38bdf8':'#7dd3fc');
+    const tc=fx2?fx2.trailCol:(inWater?'#38bdf8':'#7dd3fc');
     spawnParticle(robot.x+Math.cos(ang)*16,robot.y+Math.sin(ang)*16,
       Math.cos(ang)*0.3+(Math.random()-.5)*0.3,
       Math.sin(ang)*0.3+(Math.random()-.5)*0.3,
@@ -2473,8 +2323,8 @@ function resolveBlockCollisions(){
 // ─── Teleporte ────────────────────────────────────────────────
 // Tecla F: teleporta até o cursor do mouse dentro de um raio limitado.
 // Custa TODA a energia. Cooldown de 4s após uso.
-const TELEPORT_RANGE = 200; // px máximo de distância
-const TELEPORT_COOLDOWN_FRAMES = 240; // 4s a 60fps
+const TELEPORT_RANGE = 400; // px máximo de distância
+const TELEPORT_COOLDOWN_FRAMES = 30; // xs a 60fps
 
 function tryTeleport(){
   if(!running||robot.dead) return;
@@ -2507,9 +2357,10 @@ function tryTeleport(){
   // Efeito no destino
   spawnBurst(robot.x,robot.y,'#38bdf8',20,5);
 
-  // Gastar TODA energia + cooldown
-  robot.energy=0;
-  teleportCooldown=TELEPORT_COOLDOWN_FRAMES;
+  // Gastar TODA energia + cooldown (chip "Capacitor de Salto" reduz o cooldown)
+  robot.energy=robot.energy-20;
+  const teleCdMult=(typeof ROGUE!=='undefined' && ROGUE.mods) ? ROGUE.mods.teleportCdMult : 1;
+  teleportCooldown=Math.round(TELEPORT_COOLDOWN_FRAMES*teleCdMult);
   showAlert('⚡ TELEPORTE');
 }
 
@@ -2524,11 +2375,18 @@ function tryWeaponAction(){
   const d=Math.sqrt(dx*dx+dy*dy);
   if(d>LASER_RANGE) return;
 
-  robot.energy=Math.max(0,robot.energy-wdef.energyCost);
-  robot.heat=Math.min(robot.maxHeat,robot.heat+wdef.heatGain);
-  weaponCooldown=wdef.cooldown;
+  // Chips roguelike podem acelerar recarga e reduzir geração de calor
+  // (ex: Overclock ativo). Ver roguelike.js — neutro (1) se nada ativo.
+  const rCooldownMult = (typeof rogueGetCooldownMult==='function') ? rogueGetCooldownMult() : 1;
+  const rHeatMult     = (typeof ROGUE!=='undefined' && ROGUE.mods) ? ROGUE.mods.heatGainMult : 1;
 
-  const dmgMult = getUpgradeValue('laserDmg');
+  robot.energy=Math.max(0,robot.energy-wdef.energyCost);
+  robot.heat=Math.min(robot.maxHeat,robot.heat+wdef.heatGain*rHeatMult);
+  weaponCooldown=Math.max(1,Math.round(wdef.cooldown*rCooldownMult));
+
+  // Dano base + bônus de bioma do chip roguelike (ex: +dano no Vulcânico)
+  const rDmgMult = (typeof rogueGetDamageMult==='function') ? rogueGetDamageMult() : 1;
+  const dmgMult = getUpgradeValue('laserDmg') * rDmgMult;
 
   // BUG FIX: crítico estava definido mas nunca aplicado
   const critChance = getUpgradeValue('critChance');
@@ -2563,7 +2421,8 @@ function tryBuildAction(){
     if(buildCooldown>0) return;
     const tx=Math.floor(mouseWorld.x/TILE),ty=Math.floor(mouseWorld.y/TILE);
     if(!inBounds(tx,ty)) return;
-    const cost=BUILD_COSTS[currentBuildType]||5;
+    const bCostMult=(typeof ROGUE!=='undefined' && ROGUE.mods) ? ROGUE.mods.buildCostMult : 1;
+    const cost=(BUILD_COSTS[currentBuildType]||5)*(bCostMult||1);
     if(robot.energy<cost) return;
     const bRange = getUpgradeValue('buildRange');
     if(Math.hypot(mouseWorld.x-robot.x,mouseWorld.y-robot.y)>bRange) return;
@@ -2601,9 +2460,7 @@ function tryBuildAction(){
       integrity()[idx]=Math.max(0,integrity()[idx]-dmgAmt);
       if(integrity()[idx]<=0){
         // Usar tile de chão adequado à dimensão atual
-        const floorTile = currentDim===DIM.UNDERGROUND ? T.CAVE_FLOOR :
-                          currentDim===DIM.VOID ? T.VOID_FLOOR : T.GRASS;
-        if(typeof spawnBlockDrop==='function') spawnBlockDrop(tx,ty,t);
+        const floorTile = T.GRASS;
         setTile(tx,ty,floorTile);
         spawnBurst(tx*TILE+TILE/2,ty*TILE+TILE/2,'#fbbf24',6,2);
         score+=2;
@@ -2671,9 +2528,7 @@ function updateProjectiles(){
         }
         integrity()[idx]=Math.max(0,integrity()[idx]-dmgAmt);
         if(integrity()[idx]<=0){
-          const floorTile = currentDim===DIM.UNDERGROUND ? T.CAVE_FLOOR :
-                            currentDim===DIM.VOID ? T.VOID_FLOOR : T.GRASS;
-          if(!p.isEnemy && typeof spawnBlockDrop==='function') spawnBlockDrop(tx,ty,tt);
+          const floorTile = T.GRASS;
           setTile(tx,ty,floorTile);
           spawnBurst(p.x,p.y,'#fbbf24',5,2);
           if(!p.isEnemy) score+=2;
@@ -2692,7 +2547,9 @@ function updateProjectiles(){
       const dx=p.x-robot.x,dy=p.y-robot.y;
       if(dx*dx+dy*dy<robot.radius*robot.radius*1.4){
         const armorMult = getUpgradeValue('armor');
-        robot.hp=Math.max(0,robot.hp-p.dmg*armorMult);
+        const dmgTaken = p.dmg*armorMult;
+        robot.hp=Math.max(0,robot.hp-dmgTaken);
+        if(typeof rogueOnRobotDamage==='function') rogueOnRobotDamage(dmgTaken);
         robot.invTimer=25;
         spawnBurst(robot.x,robot.y,'#ef4444',6,2);
         projectiles.splice(i,1); continue;
@@ -2708,6 +2565,7 @@ function updateProjectiles(){
         const dx=p.x-e.x,dy=p.y-e.y;
         if(dx*dx+dy*dy<e.size*e.size*2){
           e.hp-=p.dmg; e.flashTimer=10;
+          if(typeof rogueOnEnemyDamaged==='function') rogueOnEnemyDamaged(p.dmg);
           spawnBurst(e.x,e.y,e.col,5,2);
           // BUG FIX: feedback visual de crítico (upgrade antes sem efeito)
           if(p.isCrit) spawnBurst(e.x,e.y,'#ffe100',10,3);
@@ -2717,7 +2575,6 @@ function updateProjectiles(){
             // XP vem apenas dos orbs ao serem coletados (evitar dupla contagem)
             spawnBurst(e.x,e.y,e.col,14,3);
             spawnXPOrb(e.x,e.y,e.xp||e.score);
-            if(typeof spawnEnemyDrop==='function') spawnEnemyDrop(e);
           }
           if(p.pierce){ p.pierceHit.add(e.id); hit=false; }  // BUG FIX: id estável, não índice
           else if(p.bounces>0){
@@ -2745,6 +2602,36 @@ function updateProjectiles(){
           }
         }
       }
+      // ── Sentinelas de antena (array separado de `enemies`) ──────
+      if(!hit){
+        for(let j=sentries.length-1;j>=0;j--){
+          const s=sentries[j];
+          if(s.dead) continue;
+          if(p.pierce && p.pierceHit.has('sentry'+s.id)) continue;
+          const dx=p.x-s.x,dy=p.y-s.y;
+          if(dx*dx+dy*dy<s.size*s.size*2){
+            s.hp-=p.dmg; s.flashTimer=10;
+            spawnBurst(s.x,s.y,s.col,5,2);
+            if(p.isCrit) spawnBurst(s.x,s.y,'#ffe100',10,3);
+            if(s.hp<=0&&!s.dead){
+              s.dead=true;
+              score+=25;
+              spawnBurst(s.x,s.y,s.col,14,3);
+              spawnXPOrb(s.x,s.y,20);
+              showAlert('🛰️ Sentinela destruída!');
+            }
+            if(p.pierce){ p.pierceHit.add('sentry'+s.id); }
+            else{
+              if(p.type==='rocket'||p.type==='grenade'){
+                const blastMult=getUpgradeValue('blastRadius');
+                doExplosion(p.x,p.y,(p.type==='rocket'?80:60)*blastMult,p.dmg,false);
+              }
+              projectiles.splice(i,1); hit=true;
+            }
+            break;
+          }
+        }
+      }
       if(hit) continue;
     }
 
@@ -2762,7 +2649,7 @@ function updateEnemies(){
 
     const dx=robot.x-e.x,dy=robot.y-e.y;
     const d=Math.sqrt(dx*dx+dy*dy)||1;
-    const phasing=(e.type==='SPECTER'||e.type==='VOID_SHADE'||e.flying);
+    const phasing=(e.type==='SPECTER'||e.flying);
     const speedMult=e.slowTimer>0?0.3:1.0;
 
     // Summoner: invoca scout periodicamente
@@ -2845,7 +2732,7 @@ function updateEnemies(){
 
     // Tiro
     const canShoot=e.type==='SCOUT'||e.type==='FLYER'||e.type==='TURRET'||e.type==='SPECTER'||
-                   e.type==='BOMBER'||e.type==='ELITE'||e.type==='VOID_SHADE'||e.type==='NECRO';
+                   e.type==='BOMBER'||e.type==='ELITE'||e.type==='NECRO';
     if(canShoot){
       e.shootCooldown--;
       const shootRange = e.elite ? 450 : 380;
@@ -2860,9 +2747,6 @@ function updateEnemies(){
             spawnProjectile(e.x,e.y,e.x+Math.cos(ba)*100,e.y+Math.sin(ba)*100,'enemy',true);
           }
           e.shootCooldown=50;
-        } else if(e.type==='VOID_SHADE'){
-          spawnProjectile(e.x,e.y,robot.x,robot.y,'void_bolt',true);
-          e.shootCooldown=70;
         } else {
           spawnProjectile(e.x,e.y,robot.x,robot.y,'enemy',true);
           e.shootCooldown=e.type==='TURRET'?48:e.type==='SPECTER'?60:80;
@@ -2873,22 +2757,45 @@ function updateEnemies(){
     // Corpo a corpo
     if(d<robot.radius+e.size+2&&robot.invTimer<=0){
       const armorMult = getUpgradeValue('armor');
-      robot.hp=Math.max(0,robot.hp-e.dmg*0.05*armorMult);
+      const dmgTaken = e.dmg*0.05*armorMult;
+      robot.hp=Math.max(0,robot.hp-dmgTaken);
+      if(typeof rogueOnRobotDamage==='function') rogueOnRobotDamage(dmgTaken);
       robot.invTimer=15;
     }
   }
 }
 
+let _waveClearPending = false; // true enquanto a onda atual tem inimigos vivos ou fila de spawn
+
 function updateWaves(){
+  if(bossWarningTimer>0) bossWarningTimer--;
+
   // Processar fila de spawn por frames
   for(let i=spawnQueue.length-1;i>=0;i--){
     const s=spawnQueue[i];
     s.delay--;
     if(s.delay<=0){
-      if(running) spawnEnemy(s.type,s.tx,s.ty,s.scaleMult);
+      if(running){
+        if(s.boss) spawnBoss(wave);
+        else spawnEnemy(s.type,s.tx,s.ty,s.scaleMult);
+      }
       spawnQueue.splice(i,1);
     }
   }
+
+  // ── Detecção de onda limpa → tela de chips roguelike ─────────
+  // Dispara exatamente uma vez, na transição de "tinha inimigo/fila"
+  // para "não tem mais nenhum". Se abrir a tela de escolha, retorna
+  // cedo neste frame para não deixar startWave()/waveTimer avançarem
+  // por baixo do pause (ver ROGUE.screenOpen em roguelike.js).
+  const waveHasActivity = enemies.length>0 || spawnQueue.length>0;
+  if(waveHasActivity){
+    _waveClearPending = true;
+  } else if(_waveClearPending){
+    _waveClearPending = false;
+    if(wave>0 && typeof rogueOnWaveClear==='function' && rogueOnWaveClear()) return;
+  }
+
   if(enemies.length===0&&waveTimer<=0&&spawnQueue.length===0) startWave();
   if(waveTimer>0) waveTimer--;
 
@@ -2921,20 +2828,29 @@ function updateParticles(){
       p.xpAge=(p.xpAge||0)+1;
       const pdx=robot.x-p.x,pdy=robot.y-p.y;
       const pd=Math.hypot(pdx,pdy)||1;
-      // Coleta imediata ao encostar
+      // Chip "Coletor Otimizado" + nó de evolução "Ímã de XP": raio magnético extra e atração mais rápida
+      const rm2=(typeof ROGUE!=='undefined' && ROGUE.mods) ? ROGUE.mods : null;
+      const xpRadiusBonus=rm2 ? rm2.xpRadiusBonus : 0;
+      const xpPullMult=rm2 ? rm2.xpPullMult : 1;
+      const skillMagnetBonus=(typeof getUpgradeValue==='function') ? getUpgradeValue('xpMagnet') : 0;
+      const magnetRadius=XP_MAGNET_BASE+xpRadiusBonus+skillMagnetBonus;
+      // Coleta imediata ao encostar (raio fixo — a distância que realmente importa agora é o ímã)
       if(pd<robot.radius+10){
         gainXP(p.xpVal||5);
         particles.splice(i,1); continue;
       }
-      // Atração global com força pulsante: ciclo 0.5s→burst1 / 0.5s→burst3 / 0.5s→burst4...
-      const pull=xpPullSpeed(p.xpAge);
-      // Inércia extra para longas distâncias (orb "dispara" em direção ao player)
-      const distBoost=Math.min(pd/80,3.0);
-      p.vx+=pdx/pd*pull*distBoost;
-      p.vy+=pdy/pd*pull*distBoost;
-      const orbSpd=Math.hypot(p.vx,p.vy);
-      const maxOrbSpd=pull>2?16:5;
-      if(orbSpd>maxOrbSpd){p.vx=p.vx/orbSpd*maxOrbSpd;p.vy=p.vy/orbSpd*maxOrbSpd;}
+      // Fora do raio magnético: orb fica parado (só a fricção acima o desacelera).
+      // Dentro dele: atração com força pulsante — ciclo 0.5s→burst1 / 0.5s→burst3 / 0.5s→burst4...
+      if(pd<magnetRadius){
+        const pull=xpPullSpeed(p.xpAge)*xpPullMult;
+        // Inércia extra para longas distâncias (orb "dispara" em direção ao player)
+        const distBoost=Math.min(pd/80,3.0);
+        p.vx+=pdx/pd*pull*distBoost;
+        p.vy+=pdy/pd*pull*distBoost;
+        const orbSpd=Math.hypot(p.vx,p.vy);
+        const maxOrbSpd=pull>2?16:5;
+        if(orbSpd>maxOrbSpd){p.vx=p.vx/orbSpd*maxOrbSpd;p.vy=p.vy/orbSpd*maxOrbSpd;}
+      }
     }
     if(p.life<=0) particles.splice(i,1);
   }
@@ -2942,6 +2858,13 @@ function updateParticles(){
 
 // ─── Minimap ─────────────────────────────────────────────────
 let minimapDirty=true;
+// PERF: o minimapa é o principal suspeito de lag em mapas grandes — o buffer
+// é do tamanho do mundo inteiro (até 1600×1200) e antes disso era redesenhado
+// (blit + pontos de robô/inimigos/antenas) TODO frame, mesmo sem nada novo
+// para mostrar. Agora só atualiza a cada MINIMAP_UPDATE_INTERVAL frames; entre
+// atualizações o canvas simplesmente mantém o último frame desenhado.
+const MINIMAP_UPDATE_INTERVAL = 300; // 5s a 60fps
+let minimapUpdateTimer = 0;          // <=0 → é hora de redesenhar
 const minimapBuffer=document.createElement('canvas');
 minimapBuffer.width=WORLD_W; minimapBuffer.height=WORLD_H;
 const mbCtx=minimapBuffer.getContext('2d');
@@ -2994,14 +2917,16 @@ function buildMinimap(){
 
 function drawMinimap(){
   if(!mctx) return;
+
+  // Só redesenha a cada 5s — no restante dos frames o canvas mantém a
+  // última imagem (o navegador não limpa canvases sozinho entre draws).
+  minimapUpdateTimer--;
+  if(minimapUpdateTimer>0) return;
+  minimapUpdateTimer=MINIMAP_UPDATE_INTERVAL;
+
   if(minimapDirty) buildMinimap();
   const mw=minimapCanvas.width,mh=minimapCanvas.height;
   mctx.drawImage(minimapBuffer,0,0,mw,mh);
-
-  // Dim indicator
-  const dimColors=['#22c55e','#8a7560','#a855f7'];
-  mctx.fillStyle=dimColors[currentDim]||'#fff';
-  mctx.font='7px monospace';mctx.fillText(DIM_NAMES[currentDim].slice(0,4),2,9);
 
   // Player dot
   const rx=robot.x/TILE/WORLD_W*mw,ry=robot.y/TILE/WORLD_H*mh;
@@ -3016,25 +2941,16 @@ function drawMinimap(){
     mctx.beginPath();mctx.arc(ex,ey,e.elite?2.5:1.5,0,Math.PI*2);mctx.fill();
   }
 
-  // Portal dots
-  mctx.fillStyle='#a855f7';
-  for(const p of portalMap[currentDim]){
-    const px=p.tx/WORLD_W*mw,py=p.ty/WORLD_H*mh;
-    mctx.beginPath();mctx.arc(px,py,2,0,Math.PI*2);mctx.fill();
-  }
-
-  // Antenna dots (surface only)
-  if(currentDim===DIM.SURFACE){
-    for(const ant of antennaStructures){
-      const ax=ant.tx/WORLD_W*mw,ay=ant.ty/WORLD_H*mh;
-      mctx.fillStyle=ant.active?'#22c55e':'#facc15';
-      mctx.beginPath();mctx.arc(ax,ay,3,0,Math.PI*2);mctx.fill();
-      if(!ant.active){
-        const pulse=(Math.sin(time*0.06)+1)*0.5;
-        mctx.strokeStyle=`rgba(250,204,21,${0.3+pulse*0.4})`;
-        mctx.lineWidth=0.8;
-        mctx.beginPath();mctx.arc(ax,ay,4+pulse*2,0,Math.PI*2);mctx.stroke();
-      }
+  // Antenna dots
+  for(const ant of antennaStructures){
+    const ax=ant.tx/WORLD_W*mw,ay=ant.ty/WORLD_H*mh;
+    mctx.fillStyle=ant.active?'#22c55e':'#facc15';
+    mctx.beginPath();mctx.arc(ax,ay,3,0,Math.PI*2);mctx.fill();
+    if(!ant.active){
+      const pulse=(Math.sin(time*0.06)+1)*0.5;
+      mctx.strokeStyle=`rgba(250,204,21,${0.3+pulse*0.4})`;
+      mctx.lineWidth=0.8;
+      mctx.beginPath();mctx.arc(ax,ay,4+pulse*2,0,Math.PI*2);mctx.stroke();
     }
   }
 
@@ -3053,13 +2969,34 @@ function drawMinimap(){
 }
 
 // ─── Tile Colors ─────────────────────────────────────────────
+// PERF: tiles cuja cor NÃO depende de `gTime` (só de tx/ty) — podem ser
+// cacheados com segurança, já que só mudam quando o próprio tile muda
+// (o que já invalida a entrada via setTile()).
+const STATIC_COLOR_TILES = new Set([
+  T.SAND,T.GRASS,T.FOREST,T.ROCK,T.SNOW,T.ICE,T.DESERT,T.MUSHROOM,
+  T.SWAMP,T.VOLCANIC_ASH,T.TUNDRA,T.SAVANNA,T.DIRT,T.STONE,T.IRON,
+  T.OBSIDIAN,T.REINFORCED,T.SPIKE_BLOCK,T.CAVE_WALL,T.CAVE_FLOOR,
+  T.VOID_WALL,T.CRYSTAL_FLOOR,T.GLASS_BLOCK,
+]);
+
 function getTileColor(t,tx,ty,gTime){
+  if(STATIC_COLOR_TILES.has(t)){
+    const cache=tileColorCacheBuffers[currentDim];
+    const idx=wi(tx,ty);
+    const cached=cache&&cache[idx];
+    if(cached) return cached;
+    const col=_computeTileColor(t,tx,ty,gTime);
+    if(cache) cache[idx]=col;
+    return col;
+  }
+  return _computeTileColor(t,tx,ty,gTime);
+}
+
+function _computeTileColor(t,tx,ty,gTime){
   const h=((tx*17239^ty*48271)>>>0)/0xFFFFFFFF;
-  // Tint por dimensão (sem ciclo dia/noite)
-  const dimTint = currentDim===DIM.VOID ? 0.65 : currentDim===DIM.UNDERGROUND ? 0.80 : 1.0;
   switch(t){
-    case T.DEEP_WATER:{const w=(Math.sin(tx*0.5+gTime*.0018)+Math.cos(ty*0.4-gTime*.0013))*.5+.5;return `hsl(210,${75+w*10}%,${(18+w*6)*dimTint}%)`;}
-    case T.WATER:     {const w=(Math.sin(tx*0.5+gTime*.002)+Math.cos(ty*0.4-gTime*.0015))*.5+.5;return `hsl(208,${68+w*14}%,${(35+w*10)*dimTint}%)`;}
+    case T.DEEP_WATER:{const w=(Math.sin(tx*0.5+gTime*.0018)+Math.cos(ty*0.4-gTime*.0013))*.5+.5;return `hsl(210,${75+w*10}%,${18+w*6}%)`;}
+    case T.WATER:     {const w=(Math.sin(tx*0.5+gTime*.002)+Math.cos(ty*0.4-gTime*.0015))*.5+.5;return `hsl(208,${68+w*14}%,${35+w*10}%)`;}
     case T.LAVA:      {const l=(Math.sin(tx*0.8+gTime*.003)+1)*.5;return `hsl(${12+l*12},92%,${38+l*18}%)`;}
     case T.SAND:      return `hsl(42,${52+h*12}%,${73+h*8}%)`;
     case T.GRASS:     return `hsl(${125+h*18},${48+h*12}%,${38+h*10}%)`;
@@ -3253,41 +3190,7 @@ function drawWorld(){
   const top    =Math.floor((cam.y-H/2)/ts)-1;
   const bottom =Math.ceil ((cam.y+H/2)/ts)+1;
 
-  // Void: fundo estrelado com nebulosa
-  if(currentDim===DIM.VOID){
-    ctx.fillStyle='#03010a'; ctx.fillRect(0,0,W,H);
-    // Nebulosa de fundo (paralax lento)
-    const nebX=cam.x*0.05, nebY=cam.y*0.05;
-    for(let ni=0;ni<3;ni++){
-      const ng=ctx.createRadialGradient(
-        W*0.2+ni*W*0.3-nebX%W, H*0.3+ni*H*0.2-nebY%H, 0,
-        W*0.2+ni*W*0.3-nebX%W, H*0.3+ni*H*0.2-nebY%H, 200+ni*80
-      );
-      const cols=['rgba(80,20,140,0.12)','rgba(20,40,120,0.10)','rgba(120,0,80,0.08)'];
-      ng.addColorStop(0,cols[ni]); ng.addColorStop(1,'rgba(0,0,0,0)');
-      ctx.fillStyle=ng; ctx.fillRect(0,0,W,H);
-    }
-    // Estrelas (duas camadas: próximas e distantes)
-    ctx.fillStyle='rgba(220,200,255,0.5)';
-    for(let si=0;si<80;si++){
-      const sx2=((si*7919+(cam.x*0.02)|0)%W+W)%W;
-      const sy2=((si*3571+(cam.y*0.02)|0)%H+H)%H;
-      ctx.fillRect(sx2|0,sy2|0,si%5===0?2:1,si%5===0?2:1);
-    }
-    ctx.fillStyle='rgba(180,160,255,0.25)';
-    for(let si=0;si<40;si++){
-      const sx2=((si*6131+(cam.x*0.01)|0)%W+W)%W;
-      const sy2=((si*4421+(cam.y*0.01)|0)%H+H)%H;
-      const pulse=Math.sin(time*0.04+si)*0.5+0.5;
-      ctx.globalAlpha=0.15+pulse*0.25;
-      ctx.fillRect(sx2|0,sy2|0,3,3);
-    }
-    ctx.globalAlpha=1;
-  } else if(currentDim===DIM.UNDERGROUND){
-    ctx.fillStyle='#05080f';ctx.fillRect(0,0,W,H);
-  } else {
-    ctx.fillStyle='#080e18';ctx.fillRect(0,0,W,H);
-  }
+  ctx.fillStyle='#080e18';ctx.fillRect(0,0,W,H);
 
   const wg=worldGrid();
   for(let ty=top;ty<=bottom;ty++){
@@ -3428,13 +3331,30 @@ function drawEnemies(){
     }
 
     ctx.rotate(e.angle);
-    if(e.type==='TANK'||e.type==='CRYSTAL_GOLEM'){
+    if(e.boss){
+      ctx.rotate(-e.angle);
+      const spikes=10;
+      const pulse=1+Math.sin(time*0.08)*0.06;
+      ctx.fillStyle=col;
+      ctx.beginPath();
+      for(let si=0;si<spikes*2;si++){
+        const a=(Math.PI/spikes)*si + time*0.01;
+        const rad = si%2===0 ? e.size*pulse : e.size*0.6*pulse;
+        const px=Math.cos(a)*rad, py=Math.sin(a)*rad;
+        if(si===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+      }
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle='#fff'; ctx.lineWidth=2.5; ctx.stroke();
+      ctx.fillStyle='rgba(0,0,0,0.55)';
+      ctx.beginPath(); ctx.arc(0,0,e.size*0.42,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle=col; ctx.lineWidth=2; ctx.stroke();
+    } else if(e.type==='TANK'){
       const sz=e.size;
       ctx.fillStyle=col;
       ctx.fillRect(-sz,-sz,sz*2,sz*2);
       ctx.strokeStyle='rgba(0,0,0,0.5)';ctx.lineWidth=2;
       ctx.strokeRect(-sz,-sz,sz*2,sz*2);
-      ctx.fillStyle=e.type==='CRYSTAL_GOLEM'?'#a78bfa':'#7f1d1d';
+      ctx.fillStyle='#7f1d1d';
       ctx.fillRect(0,-3,sz+4,6);
     } else if(e.type==='TURRET'){
       ctx.rotate(-e.angle);
@@ -3443,7 +3363,7 @@ function drawEnemies(){
       ctx.strokeStyle='rgba(0,0,0,0.5)';ctx.lineWidth=2;ctx.stroke();
       ctx.rotate(e.angle);
       ctx.fillStyle='#7f1d1d';ctx.fillRect(0,-2.5,e.size+5,5);
-    } else if(e.type==='SPECTER'||e.type==='VOID_SHADE'){
+    } else if(e.type==='SPECTER'){
       ctx.rotate(-e.angle);
       ctx.globalAlpha=0.72+Math.sin(time*.05)*.2;
       ctx.fillStyle=col;
@@ -3509,6 +3429,43 @@ function drawEnemies(){
   }
 }
 
+// ─── Draw Antennas (sprite) ─────────────────────────────────────
+function drawAntennas(){
+  for(const ant of antennaStructures){
+    const ax = ant.tx*TILE+TILE/2 - cam.x + W/2;
+    const ay = ant.ty*TILE+TILE/2 - cam.y + H/2;
+    if(ax<-100||ax>W+100||ay<-100||ay>H+100) continue; // fora da tela
+
+    const pulse = Math.sin(time*0.05 + ant.tx)*0.5+0.5;
+    ctx.save();
+    ctx.translate(ax, ay);
+
+    if(!ant.active){
+      // Anel pulsante indicando antena ainda inativa
+      ctx.strokeStyle=`rgba(250,204,21,${0.25+pulse*0.35})`;
+      ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(0,0,50+pulse*8,0,Math.PI*2); ctx.stroke();
+    }
+
+    ctx.shadowColor = ant.active ? '#22c55e' : '#facc15';
+    ctx.shadowBlur = 14+pulse*10;
+
+    if(spriteReady(SPRITES.antenna)){
+      const d = 56;
+      ctx.globalAlpha = ant.active ? 1 : 0.85+pulse*0.15;
+      ctx.drawImage(SPRITES.antenna,-d/2,-d/2,d,d);
+      ctx.globalAlpha = 1;
+    }
+    ctx.shadowBlur=0;
+
+    ctx.fillStyle = ant.active ? 'rgba(74,222,128,0.85)' : 'rgba(250,204,21,0.85)';
+    ctx.font = "bold 9px 'Orbitron',sans-serif"; ctx.textAlign='center';
+    ctx.fillText(ant.label, 0, 40);
+
+    ctx.restore();
+  }
+}
+
 // ─── Draw Robot ───────────────────────────────────────────────
 function drawRobot(){
   const rx=robot.x-cam.x+W/2,ry=robot.y-cam.y+H/2;
@@ -3521,22 +3478,13 @@ function drawRobot(){
   ctx.beginPath();ctx.ellipse(0,robot.radius+4,robot.radius*1.1,robot.radius*.4,0,0,Math.PI*2);ctx.fill();
   ctx.globalAlpha=1;
 
-  // Void efeito especial: silhueta violeta
-  if(currentDim===DIM.VOID){
-    ctx.globalAlpha=0.4+Math.sin(time*0.05)*0.15;
-    ctx.fillStyle='#7c3aed';
-    ctx.beginPath();ctx.arc(0,0,robot.radius+10,0,Math.PI*2);ctx.fill();
-    ctx.globalAlpha=1;
-  }
-
   if(thrust>0.05){
     ctx.globalAlpha=0.5*thrust;
     for(let i=0;i<4;i++){
       const a=i*Math.PI/2+Math.PI/4+robot.angle+Math.PI;
       const px=Math.cos(a)*14,py=Math.sin(a)*14;
-      const thrustCol = currentDim===DIM.VOID?'#a78bfa':'#7dd3fc';
       const g=ctx.createRadialGradient(px,py,0,px,py,10);
-      g.addColorStop(0,thrustCol);g.addColorStop(1,'rgba(125,211,252,0)');
+      g.addColorStop(0,'#7dd3fc');g.addColorStop(1,'rgba(125,211,252,0)');
       ctx.fillStyle=g;
       ctx.beginPath();ctx.arc(px,py,10*thrust,0,Math.PI*2);ctx.fill();
     }
@@ -3554,26 +3502,26 @@ function drawRobot(){
   }
 
   ctx.rotate(time*.004);
-  ctx.strokeStyle=currentDim===DIM.VOID?'rgba(167,139,250,0.55)':'rgba(56,189,248,0.55)';
+  ctx.strokeStyle='rgba(56,189,248,0.55)';
   ctx.lineWidth=2.5;
   ctx.beginPath();ctx.arc(0,0,robot.radius+6,0,Math.PI*2);ctx.stroke();
   ctx.rotate(-time*.004);
 
   ctx.rotate(robot.angle);
-  const bg=ctx.createRadialGradient(-4,-5,2,0,0,robot.radius);
-  bg.addColorStop(0,'#eef7ff');bg.addColorStop(0.5,'#93b1c9');bg.addColorStop(1,'#4a5d70');
-  ctx.fillStyle=bg;
-  ctx.beginPath();ctx.arc(0,0,robot.radius,0,Math.PI*2);ctx.fill();
-  ctx.strokeStyle='#1e2e3e';ctx.lineWidth=2;ctx.stroke();
-
+  if(spriteReady(SPRITES.player)){
+    ctx.shadowColor='#5ee9ff'; ctx.shadowBlur=10;
+    const d=robot.radius*2.25; // sprite ligeiramente maior que o raio de colisão
+    ctx.drawImage(SPRITES.player,-d/2,-d/2,d,d);
+    ctx.shadowBlur=0;
+  } else {
+    // Fallback vetorial enquanto o sprite carrega
+    const bg=ctx.createRadialGradient(-4,-5,2,0,0,robot.radius);
+    bg.addColorStop(0,'#eef7ff');bg.addColorStop(0.5,'#93b1c9');bg.addColorStop(1,'#4a5d70');
+    ctx.fillStyle=bg;
+    ctx.beginPath();ctx.arc(0,0,robot.radius,0,Math.PI*2);ctx.fill();
+    ctx.strokeStyle='#1e2e3e';ctx.lineWidth=2;ctx.stroke();
+  }
   ctx.rotate(-robot.angle);
-  const ex=Math.cos(robot.angle)*5,ey=Math.sin(robot.angle)*5;
-  ctx.shadowColor='#5ee9ff';ctx.shadowBlur=12;
-  ctx.fillStyle='#c7f6ff';
-  ctx.beginPath();ctx.arc(ex,ey,5.5,0,Math.PI*2);ctx.fill();
-  ctx.shadowBlur=0;
-  ctx.fillStyle='#042235';
-  ctx.beginPath();ctx.arc(ex+Math.cos(robot.angle)*1.8,ey+Math.sin(robot.angle)*1.8,2.2,0,Math.PI*2);ctx.fill();
 
   // Weapon color indicator
   const wColors={LASER:'#ef4444',SHOTGUN:'#f97316',PLASMA:'#38bdf8',ROCKET:'#f59e0b',GRENADE:'#22c55e',RAILGUN:'#00ffff',CHAIN:'#a78bfa'};
@@ -3643,12 +3591,6 @@ function drawWeaponHUD(){
     ctx.font='10px Orbitron,sans-serif';ctx.textAlign='left';
     ctx.fillText((buildLocked?'🔒':'🧱')+' '+BUILD_NAMES[currentBuildType],20,wY-36);
   }
-
-  // Dim indicator
-  const dimColors=['#22c55e','#8a7560','#a855f7'];
-  ctx.fillStyle=dimColors[currentDim]||'#fff';
-  ctx.font="bold 9px 'Orbitron',sans-serif";ctx.textAlign='right';
-  ctx.fillText(DIM_NAMES[currentDim],W-16,wY+22);
 
   ctx.restore();
 }
@@ -3779,9 +3721,9 @@ function drawTeleportHUD(){
 // ─── Main Draw ────────────────────────────────────────────────
 function draw(){
   drawWorld();
-  if(typeof drawSkyElements==='function') drawSkyElements();
+  drawAntennas();
+  drawSentries();
   drawLasers();
-  if(typeof drawWorldItems==='function') drawWorldItems();
   drawEnemies();
   drawRobot();
   drawParticles();
@@ -3789,7 +3731,6 @@ function draw(){
   updateHUD();
   drawMinimap();
   drawWeaponHUD();
-  if(typeof drawInventoryHUD==='function') drawInventoryHUD();
   drawTeleportHUD();
   drawAntennaHUD();
   drawUpgradePanel();
@@ -3797,6 +3738,8 @@ function draw(){
   if(typeof drawARIACorruption==='function') drawARIACorruption();
   drawRescueShip();
   drawRescueCountdownHUD();
+  if(typeof drawBossWarning==='function') drawBossWarning();
+  drawBossHUD();
 
   // ── Borda da tela por estatística (degradê com opacidade) ──────
   // Helper fora do if para evitar hoisting issues em strict mode
@@ -3860,16 +3803,6 @@ function draw(){
       }
     }
 
-    // 5. VOID/SUBSOLO: escuridão nas bordas (mantido do sistema anterior)
-    if(currentDim !== DIM.SURFACE){
-      const edgeDark = currentDim===DIM.VOID ? 0.55 : 0.40;
-      const rx2=robot.x-cam.x+W/2, ry2=robot.y-cam.y+H/2;
-      const vig2=ctx.createRadialGradient(rx2,ry2,Math.min(W,H)*0.30,rx2,ry2,Math.max(W,H)*0.75);
-      vig2.addColorStop(0,'rgba(0,0,0,0)');
-      vig2.addColorStop(1,currentDim===DIM.VOID?`rgba(10,0,25,${edgeDark})`:`rgba(0,0,0,${edgeDark})`);
-      ctx.save(); ctx.fillStyle=vig2; ctx.fillRect(0,0,W,H); ctx.restore();
-    }
-
     // 6. HUD de pressão de onda — barra fina no topo quando há inimigos
     if(wavePct > 0.30 && (enemies.length>0||spawnQueue.length>0)){
       const barW = W * wavePct;
@@ -3890,19 +3823,35 @@ function draw(){
       }
       ctx.restore();
     }
-  } else {
-    // Modo criativo: só vinheta de subsolo
-    if(currentDim !== DIM.SURFACE){
-      const edgeDark = currentDim===DIM.VOID ? 0.55 : 0.40;
-      const rx2=robot.x-cam.x+W/2, ry2=robot.y-cam.y+H/2;
-      const vig2=ctx.createRadialGradient(rx2,ry2,Math.min(W,H)*0.30,rx2,ry2,Math.max(W,H)*0.75);
-      vig2.addColorStop(0,'rgba(0,0,0,0)');
-      vig2.addColorStop(1,currentDim===DIM.VOID?`rgba(10,0,25,${edgeDark})`:`rgba(0,0,0,${edgeDark})`);
-      ctx.save(); ctx.fillStyle=vig2; ctx.fillRect(0,0,W,H); ctx.restore();
-    }
   }
 
+  // Tela de escolha de chips roguelike (fim de onda) — desenhada por cima de tudo
+  if(typeof drawRogueChips==='function') drawRogueChips();
+
+  // Overlay de PAUSE — só quando pausado e a tela de chips não está ocupando a tela
+  if(isPaused() && !(typeof ROGUE!=='undefined' && ROGUE.screenOpen)) drawPauseOverlay();
+
 } // ← fechamento de draw()
+
+// ─── Overlay de Pause ──────────────────────────────────────────
+function drawPauseOverlay(){
+  ctx.save();
+  ctx.fillStyle='rgba(3,8,16,0.55)';
+  ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';
+  ctx.fillStyle='rgba(0,230,255,0.9)';
+  ctx.font=`bold 22px 'Share Tech Mono',monospace`;
+  ctx.shadowColor='rgba(0,230,255,0.6)'; ctx.shadowBlur=14;
+  ctx.fillText('⏸ PAUSADO', W/2, H/2-10);
+  ctx.shadowBlur=0;
+  ctx.font=`10px 'Share Tech Mono',monospace`;
+  ctx.fillStyle='rgba(200,232,255,0.6)';
+  const reason = pauseReasons.has('upgrade')   ? 'Árvore de evolução aberta' :
+                 pauseReasons.has('roguelike') ? 'Escolhendo upgrade' :
+                 '[P] para retomar';
+  ctx.fillText(reason, W/2, H/2+14);
+  ctx.restore();
+}
 
 // ─── Main Update ─────────────────────────────────────────────
 function update(dt){
@@ -3916,9 +3865,6 @@ function update(dt){
     flowTimer=FLOW_UPDATE_INTERVAL;
   }
 
-  if(typeof updateDayCycle==='function') updateDayCycle(dt);
-  if(typeof updateWorldItems==='function') updateWorldItems();
-
   updateRobot(dt);
   if(!upgradeOpen){
     if(mouseDown) tryWeaponAction();
@@ -3926,21 +3872,25 @@ function update(dt){
   }
   updateProjectiles();
   // Modo criativo: sem inimigos
-  if(gameMode!==GAME_MODES.CREATIVE){
+  if(true){
     if(typeof updateEnemiesAI==='function') updateEnemiesAI();
     else updateEnemies();
     updateWaves();
   }
+  updateSentries();
   updateParticles();
   if(typeof updateARIA==='function') updateARIA();
+  if(typeof updateRogue==='function') updateRogue();
   updateRescueCountdown();
 }
 
 function loop(ts){
   if(!last) last=ts;
   const dt=Math.min(33,ts-last);last=ts;
-  if(running) update(dt);
-  if(running) draw();
+  if(running){
+    if(!isPaused()) update(dt);
+    draw();
+  }
   requestAnimationFrame(loop);
 }
 
@@ -3955,6 +3905,7 @@ function startGame(seed, mode){
   dirField   = dirFields[currentDim];
   chunkDirty = chunkDirtyBuffers[currentDim];
   minimapDirty=true;
+  minimapUpdateTimer=0;
   chunkDirty.fill(1);
 
   const startTX=Math.floor(WORLD_W/2);
@@ -3975,13 +3926,16 @@ function startGame(seed, mode){
   cam.x=robot.x;cam.y=robot.y;
   particles.length=0;projectiles.length=0;enemies.length=0;spawnQueue.length=0;
   time=0;last=0;score=0;wave=0;waveTimer=300;waveSpawnLeft=0;autoWaveTimer=0;
+  bossWarningTimer=0;bossWarningWave=0;
+  activeBoss=null; _lastBossArchetypeIdx=-1;
   currentWeapon='LASER';currentTool='laser';currentBuildType=T.BUILT_BLOCK;
   weaponCooldown=0;buildCooldown=0;flowTimer=0;portalCooldown=0;teleportCooldown=0;upgradeOpen=false;
   rescueCountdown=-1; rescueShip=null;
+  pauseReasons.clear();
+  if(typeof resetRogue==='function') resetRogue();
 
   rebuildFlowField(startTX,startTY);
   if(typeof resetARIA==='function') resetARIA();
-  if(typeof resetInventory==='function') resetInventory();
   if(typeof resetScanner==='function') resetScanner();
   menuScreen.classList.add('hidden');
   hud.classList.remove('hidden');
@@ -4104,6 +4058,8 @@ if(btnMenuEnd) btnMenuEnd.onclick= ()=>{running=false;menuScreen.classList.remov
 if(btnRestart) btnRestart.onclick= ()=>{if(endScreen)endScreen.classList.remove('show');startGame(seedStr,gameMode);};
 const btnARIANav = document.getElementById('btnARIANav');
 if(btnARIANav) btnARIANav.onclick = ()=>{ if(typeof toggleARIANav==='function') toggleARIANav(); };
+const btnPause = document.getElementById('btnPause');
+if(btnPause) btnPause.onclick = ()=>{ togglePause(); };
 if(seedInput)  seedInput.addEventListener('keydown',e=>{if(e.key==='Enter'){ WORLD_W=_selectedMapW;WORLD_H=_selectedMapH; startGame(seedInput.value.trim()||'TheInitWord'); }});
 
 // O loop de render é iniciado pelo startGame

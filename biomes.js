@@ -16,10 +16,10 @@ const BIOME_FX = {
   [10/*DESERT*/]:       { heatRate: 0.12, energyRate:-0.01, visionR:480, trailCol:'#fbbf24' },
   [8 /*LAVA*/]:         { heatRate: 0.90, energyRate:-0.02, visionR:460, trailCol:'#f97316',  dmg:0.4,  dmgCol:'#f97316' },
   [19/*MUSHROOM*/]:     { heatRate: 0.01, energyRate:0.015, visionR:360, trailCol:'#c084fc' },
-  [1 /*DEEP_WATER*/]:   { heatRate:-0.28, energyRate:-0.08, visionR:380, trailCol:'#38bdf8' },
+  [1 /*DEEP_WATER*/]:   { heatRate:-0.78, energyRate:-0.08, visionR:380, trailCol:'#38bdf8' },
   [2 /*WATER*/]:        { heatRate:-0.20, energyRate:0,     visionR:440, trailCol:'#38bdf8' },
-  [20/*SWAMP*/]:        { heatRate: 0.06, energyRate:-0.03, visionR:300, trailCol:'#6abf3d' },
-  [21/*TOXIC*/]:        { heatRate: 0.35, energyRate:-0.05, visionR:300, trailCol:'#6abf3d',  dmg:0.12, dmgCol:'#6abf3d' },
+  [20/*SWAMP*/]:        { heatRate: 0.03, energyRate:-0.03, visionR:300, trailCol:'#6abf3d' },
+  [21/*TOXIC*/]:        { heatRate: 0.20, energyRate:-0.05, visionR:300, trailCol:'#6abf3d',  dmg:0.12, dmgCol:'#6abf3d' },
   [22/*VOLCANIC_ASH*/]: { heatRate: 0.16, energyRate:0,     visionR:340, trailCol:'#78716c' },
   [23/*CORAL*/]:        { heatRate:-0.15, energyRate:0,     visionR:440, trailCol:'#2dd4bf' },
   [24/*TUNDRA*/]:       { heatRate:-0.07, energyRate:0.01,  visionR:460, trailCol:'#e2e8f0' },
@@ -56,12 +56,14 @@ function applyBiomeEffects(tile){
     robot.energy = Math.max(0, Math.min(robot.maxEnergy, robot.energy + fx.energyRate));
   if(fx.dmg){
     robot.hp = Math.max(0, robot.hp - fx.dmg);
+    if(typeof rogueOnRobotDamage==='function') rogueOnRobotDamage(fx.dmg);
     if(Math.random()<0.18)
       spawnParticle(robot.x+(Math.random()-.5)*20, robot.y+(Math.random()-.5)*20,
         (Math.random()-.5)*1.5,(Math.random()-.5)*1.5, 20, fx.dmgCol, 3);
   }
   if(robot.heat >= robot.maxHeat){
     robot.hp = Math.max(0, robot.hp - 0.3);
+    if(typeof rogueOnRobotDamage==='function') rogueOnRobotDamage(0.3);
     if(Math.random()<0.15)
       spawnParticle(robot.x+(Math.random()-.5)*20, robot.y,
         (Math.random()-.5)*1.5,-1-Math.random()*2, 20,'#ef4444',3);

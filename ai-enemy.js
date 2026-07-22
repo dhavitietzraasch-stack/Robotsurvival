@@ -6,13 +6,13 @@
 'use strict';
 
 const AI_ENEMY = {
-  TELEPORT_MIN_DIST: 40 * 32,   // só teleporta se > 40 tiles do player
+  TELEPORT_MIN_DIST: 50 * 32,   // só teleporta se > 40 tiles do player
   SPAWN_MIN:         10,         // anel de reposicionamento mín (tiles)
   SPAWN_MAX:         16,         // anel de reposicionamento máx (tiles)
   TELEPORT_CD:       420,        // 7s de cooldown individual
   SEP_FORCE:         0.65,
   SEP_FULL_LIMIT:    30,
-  SHOOT_COOLDOWN_BASE: { SCOUT:75, FLYER:85, TURRET:44, SPECTER:55, BOMBER:95, ELITE:45, VOID_SHADE:65, NECRO:60 },
+  SHOOT_COOLDOWN_BASE: { SCOUT:75, FLYER:85, TURRET:44, SPECTER:55, BOMBER:95, ELITE:45, NECRO:60 },
   // ── Group AI ─────────────────────────────────────────────────
   GROUP_SIZE: 3,                   // tamanho médio de grupos
   LEADER_CHANCE: 0.15,            // chance de um inimigo ser líder
@@ -114,7 +114,7 @@ function formEnemyGroup(){
 function updateEnemyMovement(e){
   const dx=robot.x-e.x, dy=robot.y-e.y;
   const d=Math.sqrt(dx*dx+dy*dy)||1;
-  const phasing=(e.type==='SPECTER'||e.type==='VOID_SHADE'||e.flying);
+  const phasing=(e.type==='SPECTER'||e.flying);
   const speedMult=e.slowTimer>0?0.3:1.0;
   
   // ── Role-based behavior ─────────────────────────────────────
@@ -183,7 +183,6 @@ function updateEnemyMovement(e){
             if(typeof score!=='undefined') score+=e.score;
             if(typeof spawnBurst==='function') spawnBurst(e.x,e.y,e.col,10,3);
             if(typeof spawnXPOrb==='function') spawnXPOrb(e.x,e.y,e.xp||e.score);
-            if(typeof spawnEnemyDrop==='function') spawnEnemyDrop(e);
           }
         }
         if(e._biomeDmgCd>0) e._biomeDmgCd--;
@@ -260,16 +259,52 @@ function updateEnemyMovement(e){
     if(ut===28/*TRAP_DAMAGE*/){
       e.hp-=0.8;e.flashTimer=4;
       if(Math.random()<.08)spawnParticle(e.x,e.y,(Math.random()-.5)*2,-1,15,'#ef4444',3);
-      if(e.hp<=0&&!e.dead){e.dead=true;score+=e.score;spawnBurst(e.x,e.y,e.col,10,3);spawnXPOrb(e.x,e.y,e.xp||e.score);if(typeof spawnEnemyDrop==='function')spawnEnemyDrop(e);}
+      if(e.hp<=0&&!e.dead){e.dead=true;score+=e.score;spawnBurst(e.x,e.y,e.col,10,3);spawnXPOrb(e.x,e.y,e.xp||e.score);}
     }
     if(ut===29/*SPIKE_BLOCK*/){
       e.hp-=2.5;e.flashTimer=6;
       spawnParticle(e.x,e.y,(Math.random()-.5)*2,-1.5,18,'#ef4444',3);
-      if(e.hp<=0&&!e.dead){e.dead=true;score+=e.score;spawnBurst(e.x,e.y,e.col,10,3);spawnXPOrb(e.x,e.y,e.xp||e.score);if(typeof spawnEnemyDrop==='function')spawnEnemyDrop(e);}
+      if(e.hp<=0&&!e.dead){e.dead=true;score+=e.score;spawnBurst(e.x,e.y,e.col,10,3);spawnXPOrb(e.x,e.y,e.xp||e.score);}
     }
   }
 }
 
+
+// ─── Ataques especiais de chefe ──────────────────────────────
+// Cada chefe tem um bossPattern definido no spawn (game.js:spawnBoss):
+//   'ring'   → rajada radial de projéteis em todas as direções
+//   'summon' → invoca inimigos menores como reforço
+//   'charge' → investida rápida na direção do jogador
+function bossSpecialAttack(e){
+  if(!e || e.dead) return;
+  if(typeof spawnBurst==='function') spawnBurst(e.x,e.y,'#fff',12,3);
+
+  if(e.bossPattern==='ring'){
+    const N=12;
+    for(let i=0;i<N;i++){
+      const a=(Math.PI*2/N)*i;
+      const tx=e.x+Math.cos(a)*160, ty=e.y+Math.sin(a)*160;
+      if(typeof spawnProjectile==='function') spawnProjectile(e.x,e.y,tx,ty,'void_bolt',true);
+    }
+    if(typeof showAlert==='function') showAlert('⚠ RAJADA RADIAL DO CHEFE!');
+  } else if(e.bossPattern==='summon'){
+    const stx=Math.floor(e.x/TILE), sty=Math.floor(e.y/TILE);
+    const n=2+Math.floor(Math.random()*2);
+    for(let i=0;i<n;i++){
+      if(typeof spawnEnemy==='function'){
+        const t=Math.random()<0.5?'SCOUT':'SWARM';
+        spawnEnemy(t, stx+Math.floor(Math.random()*5-2), sty+Math.floor(Math.random()*5-2), 0.85);
+      }
+    }
+    if(typeof showAlert==='function') showAlert('⚠ CHEFE INVOCA REFORÇOS!');
+  } else if(e.bossPattern==='charge'){
+    if(typeof robot!=='undefined' && robot){
+      const dx=robot.x-e.x, dy=robot.y-e.y, d=Math.sqrt(dx*dx+dy*dy)||1;
+      e.vx += (dx/d)*9; e.vy += (dy/d)*9;
+    }
+    if(typeof showAlert==='function') showAlert('⚠ INVESTIDA DO CHEFE!');
+  }
+}
 
 // Verifica se há linha de visão entre dois pontos (sem paredes sólidas no caminho)
 function hasLineOfSight(x1, y1, x2, y2){
@@ -288,20 +323,19 @@ function hasLineOfSight(x1, y1, x2, y2){
 function updateEnemyShooting(e,d,dx,dy){
   const can=e.type==='SCOUT'||e.type==='FLYER'||e.type==='TURRET'||
             e.type==='SPECTER'||e.type==='BOMBER'||e.type==='ELITE'||
-            e.type==='VOID_SHADE'||e.type==='NECRO';
+            e.type==='NECRO'||e.boss;
   if(!can) return;
   e.shootCooldown--;
   const range=e.elite?450:380;
   if(e.shootCooldown>0||d>=range) return;
   // Verificar linha de visão (phasing/void_shade ignoram paredes)
-  const isPhasing=(e.type==='SPECTER'||e.type==='VOID_SHADE'||e.flying);
+  const isPhasing=(e.type==='SPECTER'||e.flying);
   if(!isPhasing && !hasLineOfSight(e.x, e.y, robot.x, robot.y)) return;
   switch(e.type){
     case'BOMBER': spawnProjectile(e.x,e.y,robot.x,robot.y,'grenade',true); e.shootCooldown=100; break;
     case'ELITE':
       for(let si=-1;si<=1;si++){const ba=Math.atan2(dy,dx)+si*.2;spawnProjectile(e.x,e.y,e.x+Math.cos(ba)*100,e.y+Math.sin(ba)*100,'enemy',true);}
       e.shootCooldown=50; break;
-    case'VOID_SHADE': spawnProjectile(e.x,e.y,robot.x,robot.y,'void_bolt',true); e.shootCooldown=70; break;
     default:
       spawnProjectile(e.x,e.y,robot.x,robot.y,'enemy',true);
       e.shootCooldown=e.type==='TURRET'?48:e.type==='SPECTER'?60:80;
@@ -338,7 +372,10 @@ function updateEnemiesAI(){
   
   for(let i=enemies.length-1;i>=0;i--){
     const e=enemies[i];
-    if(e.dead){enemies.splice(i,1);continue;}
+    if(e.dead){
+      if(e.boss && typeof onBossDefeated==='function') onBossDefeated(e);
+      enemies.splice(i,1);continue;
+    }
     if(e.flashTimer>0)e.flashTimer--;
     if(e.slowTimer>0)e.slowTimer--;
     if(e._buffTimer > 0) e._buffTimer--;
@@ -353,6 +390,15 @@ function updateEnemiesAI(){
         spawnBurst(e.x,e.y,'#6d28d9',8,2);
       }
     }
+
+    // Chefe: dispara seu padrão de ataque especial periodicamente
+    if(e.boss){
+      e._bossSpecialTimer=(e._bossSpecialTimer||0)+1;
+      if(e._bossSpecialTimer>=(e.bossSpecialCD||300)){
+        e._bossSpecialTimer=0;
+        bossSpecialAttack(e);
+      }
+    }
     
     const dx=robot.x-e.x,dy=robot.y-e.y,d=Math.sqrt(dx*dx+dy*dy)||1;
     if(e.type!=='TURRET') updateEnemyMovement(e);
@@ -364,8 +410,22 @@ function updateEnemiesAI(){
     if(e._leaderBuff) meleeDmg *= 1.1;
     
     if(d<robot.radius+e.size+2&&robot.invTimer<=0){
-      robot.hp=Math.max(0,robot.hp-meleeDmg*.05*getUpgradeValue('armor'));
+      const dmgTaken=meleeDmg*.05*getUpgradeValue('armor');
+      robot.hp=Math.max(0,robot.hp-dmgTaken);
+      if(typeof rogueOnRobotDamage==='function') rogueOnRobotDamage(dmgTaken);
       robot.invTimer=15;
+      // Espinhos: reflete parte do dano de contato de volta ao inimigo
+      const thorns=(typeof ROGUE!=='undefined'&&ROGUE.mods.thornsPct)||0;
+      if(thorns>0){
+        e.hp-=meleeDmg*thorns;
+        e.flashTimer=4;
+        if(e.hp<=0&&!e.dead){
+          e.dead=true;
+          if(typeof score!=='undefined') score+=e.score;
+          if(typeof spawnBurst==='function') spawnBurst(e.x,e.y,e.col||'#fbbf24',10,3);
+          if(typeof spawnXPOrb==='function') spawnXPOrb(e.x,e.y,e.xp||e.score);
+        }
+      }
     }
   }
   

@@ -1,6 +1,6 @@
 /* ============================================================
    SIGNAL LOST — ai-survival.js  v2.0
-   IA ARIA: alertas, navegação holográfica, glitches por corrupção
+   IA ARIA: alertas, navegação holográfica, SEM glitches por corrupção
    Carregado ANTES de game.js
    ============================================================ */
 'use strict';
@@ -21,25 +21,23 @@ const ARIA_LINES={
   hpLow:    ['Armadura abaixo do limiar seguro.','Reparos imediatos recomendados.','Estrutura danificada.'],
   enCrit:   ['FALHA DE ENERGIA IMINENTE.','Sistemas principais offline em breve.','Energia crítica.'],
   enLow:    ['Reservas energéticas reduzidas.','Bateria abaixo de 20%.','Consumo excede recarga.'],
-  heatCrit: ['SUPERAQUECIMENTO CRÍTICO.','Fusão do núcleo em... [ERRO]','Temperatura letal. Resfrie já.'],
+  heatCrit: ['SUPERAQUECIMENTO CRÍTICO.','Fusão do núcle iminente','Temperatura letal. Resfrie já.'],
   heatHigh: ['Superaquecimento detectado.','Temperatura dos núcleos elevada.','Dissipação insuficiente.'],
   enemy:    ['Inimigos convergindo.','Ameaças detectadas no perímetro.','Contatos hostis próximos.'],
   enemyMass:['ALERTA: força inimiga massiva.','Recalculando... fuga recomendada.','Colapso do perímetro iminente.'],
   navOn:    ['Rota otimizada calculada.','Traçando caminho para antena.','Navegação holográfica ativa.'],
   navOff:   ['Navegação encerrada.','Scanner offline.','Rota apagada.'],
   navNoEn:  ['Energia insuficiente para scanner.','Scanner requer mais energia.'],
-  navHeat:  ['Superaquecimento — scanner desligou.','[GLITCH] r0ta f@lhou por calor...'],
+  navHeat:  ['Superaquecimento — scanner desligou.','rota falhou por temperatura elevada'],
   ant:      ['Antena ativa. Sinal amplificado.','Mais um transmissor online.'],
   antClose: ['Antena detectada nas proximidades.','Estrutura de transmissão a caminho.'],
+  bossWarning:['Assinatura energética massiva se aproximando.','Ameaça de grande porte detectada — alerta máximo.','Recomendo cautela extrema. Algo grande vem por aí.'],
   rescue:   ['Nave de resgate detectada. CORRAM.','Sinal de resgate confirmado. Rota de fuga ativa.','Embarcação tripulada em aproximação!'],
   rescueLow:['30 segundos para partida da nave.','ATENÇÃO: janela de resgate se fechando!'],
   biomeWat: ['Água detectada. Temperatura estabilizando.','Resfriamento via imersão.'],
   biomeLav: ['Zona vulcânica. Temperatura crítica iminente.','PERIGO: lava corrói sistemas.'],
-  biomeVoid:['Anomalia dimensional detectada.','Espaço-tempo instável.','Gravidade comprometida. [ERRO]'],
-  biomeCave:['Subsolo detectado. Visão reduzida.','Caverna — monitorando pressão.'],
-  glitch:   ['[ERRO] memória corrompida.','D4D0S INV@L1D0S...','...onde estou?... [rebooting]',
-             'SIN4L P3RD1D0 — sistema parcialmente off.','Unid@de-7...7...7... [loop]',
-             '[memória corrompida] #%@!','...o mundo é grande... muito grande...'],
+  glitch:   ['enviando mensagem de ajuda... ERRO','planeta desconhecido','onde estamos?',
+             'SINAL PERDIDO — sistema parcialmente off.'],
   idle:     ['Monitorando ambiente.','Sistemas operacionais.','Nenhuma ameaça imediata.','Coletando dados de terreno.'],
 };
 
@@ -224,6 +222,4 @@ function ariaOnBiome(name){
   if(ARIA._prevBiome===name) return; ARIA._prevBiome=name;
   if(name==='Água Rasa'||name==='Mar Profundo') ariaSpeak('biomeWat');
   else if(name==='Vulcânico') ariaSpeak('biomeLav');
-  else if(name==='Dimensão Void'||name==='Prado Fantasma') ariaSpeak('biomeVoid');
-  else if(name==='Caverna'||name==='Pedra') ariaSpeak('biomeCave');
 }
