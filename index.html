@@ -112,7 +112,7 @@
       </div>
     </div>
 
-    <!-- top-right: tools + menu btn -->
+    <!-- top-right: tools + system actions + menu btn -->
     <div class="hud-actions">
       <div class="hud-panel" style="display:flex;gap:4px;flex-direction:column;">
         <div class="hud-label">FERRAMENTA</div>
@@ -122,13 +122,23 @@
           <button class="tool-btn-hud" data-tool="destroy">💥 DESTRUIR</button>
         </div>
       </div>
-      <div style="display:flex;gap:4px;align-items:center;">
-        <span id="hudModeLabel" style="font-family:var(--font-ui);font-size:9px;letter-spacing:.1em;color:var(--cyan);background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:3px 10px;">🎯 FINITO</span>
-        <button id="btnPause" class="btn btn-sm btn-secondary" style="pointer-events:auto;padding:5px 12px;font-size:10px;" title="Pausar (P)">⏸ Pause</button>
-        <button id="btnARIANav" class="btn btn-sm btn-secondary" style="pointer-events:auto;padding:5px 12px;font-size:10px;" title="Navegação ARIA (V)">📡 A.R.I.A</button>
+      <div class="hud-panel hud-sysrow">
+        <span id="hudModeLabel" class="mode-pill">🎯 FINITO</span>
+        <button id="btnPause" class="btn btn-sm btn-secondary" title="Pausar (P)">⏸ Pause</button>
+        <button id="btnARIANav" class="btn btn-sm btn-secondary" title="Navegação ARIA (V)">📡 A.R.I.A</button>
+        <button id="btnExportMapHud" class="btn btn-sm btn-secondary" title="Exportar mapa atual (JSON)">⬇ Mapa</button>
       </div>
-      <button id="btnMenu" class="btn btn-sm btn-secondary" style="pointer-events:auto;">☰ Menu</button>
+      <button id="btnMenu" class="btn btn-sm btn-secondary hud-menu-btn">☰ Menu</button>
     </div>
+  </div>
+
+  <!-- A.R.I.A — comunicação dedicada da IA de sobrevivência (visualmente distinta do alerta genérico) -->
+  <div id="ariaAlert" class="aria-alert">
+    <div class="aria-alert-head">
+      <span class="aria-dot"></span>
+      <span class="aria-tag">A.R.I.A</span>
+    </div>
+    <div class="aria-alert-text"></div>
   </div>
 
   <!-- biome tag (bottom center) -->

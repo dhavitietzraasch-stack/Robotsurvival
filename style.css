@@ -353,8 +353,41 @@ html, body {
 .hud-actions {
   display: flex;
   flex-direction: column;
+  align-items: flex-end;
   gap: 6px;
   pointer-events: auto;
+}
+
+/* Linha de ações do sistema (pausa / navegação A.R.I.A / exportar mapa) —
+   agrupada num hud-panel para ficar visualmente coesa com o painel FERRAMENTA
+   acima, em vez de botões soltos flutuando no HUD */
+.hud-sysrow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 6px 8px;
+}
+.hud-sysrow .btn { pointer-events: auto; padding: 5px 12px; font-size: 10px; }
+
+.mode-pill {
+  font-family: var(--font-ui);
+  font-size: 9px;
+  letter-spacing: .1em;
+  color: var(--cyan);
+  background: rgba(0,230,255,.08);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+/* Menu fica isolado com uma respiração extra — é a ação mais "destrutiva"
+   do grupo (sai da partida), por isso não divide painel com as demais */
+.hud-menu-btn {
+  pointer-events: auto;
+  margin-top: 2px;
 }
 
 /* tool indicator */
@@ -401,6 +434,66 @@ html, body {
   transform: translateX(-8px);
 }
 .hud-alert.show { opacity: 1; transform: translateX(0); }
+
+/* ─── A.R.I.A — comunicação dedicada da IA de sobrevivência ────
+   Antes, as falas da ARIA dividiam o mesmo #hudAlert genérico usado por
+   level-up, chefe destruído, mapa exportado etc. — e sumiam no meio dos
+   outros avisos. Agora ela tem seu próprio cartão, fixo, com identidade
+   visual própria (tom holográfico ciano/violeta, igual à navegação/HUD
+   que ai-survival.js já desenha no canvas) para ficar sempre visível. */
+.aria-alert {
+  position: absolute;
+  top: 96px; left: 14px;
+  max-width: 250px;
+  background: linear-gradient(135deg, rgba(6,16,30,.93), rgba(18,10,38,.90));
+  border: 1px solid rgba(167,139,250,.4);
+  border-left: 3px solid var(--cyan);
+  border-radius: 4px 10px 10px 4px;
+  padding: 6px 12px 7px 10px;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 18px rgba(0,0,0,.5), 0 0 14px rgba(0,229,255,.10);
+  opacity: 0;
+  transform: translateX(-10px);
+  transition: opacity .3s, transform .3s, border-color .4s, box-shadow .4s;
+  pointer-events: none;
+}
+.aria-alert.show { opacity: 1; transform: translateX(0); }
+.aria-alert-head { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.aria-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 8px var(--cyan), 0 0 3px var(--cyan);
+  animation: ariaPulse 1.6s ease-in-out infinite;
+}
+@keyframes ariaPulse {
+  0%, 100% { opacity: .4; transform: scale(.8); }
+  50%      { opacity: 1;  transform: scale(1.15); }
+}
+.aria-tag {
+  font-family: var(--font-ui);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .18em;
+  color: var(--cyan);
+  text-shadow: 0 0 8px rgba(0,229,255,.5);
+}
+.aria-alert-text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+  color: #d8c8ff;
+  text-shadow: 0 0 6px rgba(167,139,250,.35);
+  letter-spacing: .02em;
+}
+/* Alternado via JS quando ARIA.corruption>0.5 (ver showARIAAlert em
+   ai-survival.js) — o mesmo estado que já deixa as falas "glitchadas" */
+.aria-alert.corrupted {
+  border-color: rgba(239,68,68,.5);
+  border-left-color: var(--red);
+  box-shadow: 0 4px 18px rgba(0,0,0,.5), 0 0 14px rgba(239,68,68,.14);
+}
+.aria-alert.corrupted .aria-dot { background: var(--red); box-shadow: 0 0 8px var(--red), 0 0 3px var(--red); }
+.aria-alert.corrupted .aria-tag { color: var(--red); text-shadow: 0 0 8px rgba(239,68,68,.5); }
 
 /* ─── Game-over / Win screen ────────────────────────────────── */
 #endScreen {

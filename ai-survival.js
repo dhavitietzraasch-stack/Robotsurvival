@@ -46,6 +46,23 @@ function _glitchText(s,intensity){
   return s.split('').map(c=>c===' '?c:Math.random()<intensity*.14?gc[Math.floor(Math.random()*gc.length)]:c).join('');
 }
 
+// ─── Alerta dedicado da ARIA ───────────────────────────────────
+// Antes as falas passavam pelo showAlert() genérico (game.js) e disputavam
+// espaço/atenção com avisos de level-up, chefe destruído, mapa exportado etc.
+// Agora têm cartão próprio (#ariaAlert, ver index.html/style.css), com um
+// timer e visual independentes — inclusive um estado "corrupted" que reflete
+// ARIA.corruption, reaproveitando o mesmo tema visual do restante do arquivo.
+const ariaAlertEl = document.getElementById('ariaAlert');
+const ariaAlertTextEl = ariaAlertEl ? ariaAlertEl.querySelector('.aria-alert-text') : null;
+let ariaAlertTimer = 0;
+function showARIAAlert(msg){
+  if(!ariaAlertEl) return;
+  if(ariaAlertTextEl) ariaAlertTextEl.textContent = msg;
+  ariaAlertEl.classList.add('show');
+  ariaAlertEl.classList.toggle('corrupted', ARIA.corruption>0.5);
+  ariaAlertTimer = 220;
+}
+
 function ariaSpeak(cat,force=false){
   const lines=ARIA_LINES[cat]; if(!lines) return;
   let line;
@@ -55,17 +72,21 @@ function ariaSpeak(cat,force=false){
     line=lines[Math.floor(Math.random()*lines.length)];
     if(ARIA.corruption>.35) line=_glitchText(line,ARIA.corruption);
   }
-  if(force){showAlert(line);ARIA.lastAlert=time;}
+  if(force){showARIAAlert(line);ARIA.lastAlert=time;}
   else ARIA.queue.push(line);
 }
 
 function updateARIA(){
+  // Decrementa o timer do cartão da ARIA independente do resto (fora do
+  // early-return abaixo) para a fala sempre sumir com a duração correta.
+  if(ariaAlertTimer>0){ariaAlertTimer--;}
+  else if(ariaAlertEl){ariaAlertEl.classList.remove('show');}
   if(!running||robot.dead) return;
   ARIA.corruption=Math.min(1,ARIA.corruption+ARIA.corruptionRate);
 
   // Flush queue
   if(ARIA.queue.length>0&&time-ARIA.lastAlert>ARIA.alertCD){
-    showAlert(ARIA.queue.shift()); ARIA.lastAlert=time;
+    showARIAAlert(ARIA.queue.shift()); ARIA.lastAlert=time;
   }
 
   const can=time-ARIA.lastAlert>ARIA.alertCD;
@@ -214,6 +235,8 @@ function resetARIA(){
   ARIA.corruption=0;ARIA.lastAlert=0;ARIA.queue=[];
   ARIA._wHp=false;ARIA._wEn=false;ARIA._wHeat=false;ARIA._prevBiome='';
   Object.assign(ARIA.nav,{active:false,target:null,path:[],pulse:0,glitch:0,fadeTimer:0});
+  ariaAlertTimer=0;
+  if(ariaAlertEl){ariaAlertEl.classList.remove('show','corrupted');}
 }
 function ariaOnAntenna(){ariaSpeak('ant',true);}
 function ariaOnRescueShip(){ariaSpeak('rescue',true);}

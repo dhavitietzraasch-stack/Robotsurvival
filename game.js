@@ -7,6 +7,10 @@
 let WORLD_W = 800;
 let WORLD_H = 600;
 
+// Controles da animação de scan sincronizada com o refresh
+let minimapScanY = -1; // -1 = parado (aguardando atualização)
+let minimapScanSpeed = 0; // velocidade calculada dinamicamente
+
 // ─── Constants ───────────────────────────────────────────────
 const TILE        = 32;
 const LASER_RANGE = 520;
@@ -795,7 +799,7 @@ const WEAPONS = {
   ROCKET:  {name:'Foguete',      key:'4', icon:'🚀', energyCost:20, heatGain:5,   cooldown:80, unlockLevel:3},
   GRENADE: {name:'Granada',      key:'5', icon:'💣', energyCost:12, heatGain:2,   cooldown:60, unlockLevel:5},
   // Novas armas desbloqueáveis por nível
-  RAILGUN: {name:'Railgun',      key:'6', icon:'⚙', energyCost:30, heatGain:8,   cooldown:120,unlockLevel:8},
+  RAILGUN: {name:'Railgun',      key:'6', icon:'⚙', energyCost:40, heatGain:30,   cooldown:120,unlockLevel:8},
   CHAIN:   {name:'Corrente',     key:'7', icon:'⛓', energyCost:6,  heatGain:2,   cooldown:15, unlockLevel:12},
 };
 
@@ -855,7 +859,12 @@ const SKILL_TREE = {
 
 const evolution = {
   xp: 0, level: 1, xpToNext: 100, totalXP: 0, points: 0,
-  unlocked: new Set(), // IDs dos nós comprados
+  unlocked: new Set(), // IDs dos nós "disponíveis/comprados" no ciclo ATUAL da árvore
+  // Contagem TOTAL de compras por efeito, através de todos os ciclos — nunca é
+  // decrementada quando a árvore reabastece (ver _checkUpgradeTreeRefill).
+  // É esta contagem, e não `unlocked`, que alimenta countEffect()/os bônus reais.
+  effectCounts: {},
+  resets: 0, // quantas vezes a árvore já reabasteceu (compra completa de todos os nós)
 };
 
 // Verifica se um nó pode ser comprado
@@ -871,19 +880,37 @@ function canUnlockNode(id){
 function buyNode(id){
   if(!canUnlockNode(id)) return false;
   evolution.unlocked.add(id);
+  const eff = SKILL_TREE[id].effect;
+  evolution.effectCounts[eff] = (evolution.effectCounts[eff]||0) + 1;
   evolution.points--;
   applyPassiveBonuses();
   spawnBurst(robot.x, robot.y, '#facc15', 8, 3);
+  _checkUpgradeTreeRefill();
   return true;
 }
 
-// Quantos nós com effect=key foram desbloqueados
-function countEffect(eff){
-  let n = 0;
-  for(const id of evolution.unlocked){
-    if(SKILL_TREE[id] && SKILL_TREE[id].effect === eff) n++;
+// Quando o último nó da árvore é comprado, a loja "reabastece": o Set de nós
+// obtidos é limpo para que todos voltem a ficar disponíveis (raízes liberadas,
+// resto exige recomprar o caminho de novo, como no início). O que NUNCA é
+// tocado aqui é evolution.effectCounts — é ele quem alimenta countEffect(), e
+// por isso os bônus/status já conquistados pelo jogador permanecem intactos;
+// comprar de novo apenas soma bônus adicionais em cima dos que já existem.
+function _checkUpgradeTreeRefill(){
+  const allIds = Object.keys(SKILL_TREE);
+  if(allIds.every(id => evolution.unlocked.has(id))){
+    evolution.unlocked.clear();
+    evolution.resets = (evolution.resets||0) + 1;
+    showAlert('🧬 Árvore de evolução reabastecida! Upgrades disponíveis de novo — bônus mantidos.');
+    spawnBurst(robot.x, robot.y, '#00e5ff', 20, 5);
   }
-  return n;
+}
+
+// Quantos nós com effect=key já foram comprados NO TOTAL (todos os ciclos).
+// Usa o ledger persistente evolution.effectCounts, não evolution.unlocked,
+// para que um reabastecimento da árvore (ver _checkUpgradeTreeRefill) nunca
+// derrube os bônus que o jogador já tem.
+function countEffect(eff){
+  return evolution.effectCounts[eff] || 0;
 }
 
 const XP_CURVE = [0,100,200,350,550,800,1100,1500,2000,2600,3300,4200,5500,7000,9000];
@@ -1035,6 +1062,9 @@ function spawnBoss(waveNum){
 
   // Chefes escalam mais forte que mobs comuns (ver "profundidade" em startWave)
   const scaleMult = 1 + (tier-1)*0.55;
+  // XP do chefe cresce também com o nível atual do jogador (além do tier da
+  // onda), para o drop continuar valendo a pena mesmo em níveis altos.
+  const bossLevelMult = 1 + evolution.level*0.18;
 
   const robTX=Math.floor(robot.x/TILE), robTY=Math.floor(robot.y/TILE);
   const ang=Math.random()*Math.PI*2, dist=22;
@@ -1050,7 +1080,7 @@ function spawnBoss(waveNum){
     speed: arch.pattern==='ring' ? 1.7 : 1.05,
     dmg:(26+tier*4)*scaleMult,
     col:arch.color, size:34+Math.min(tier,6)*2,
-    score:Math.ceil(350*scaleMult), xp:Math.ceil(420*scaleMult),
+    score:Math.ceil(350*scaleMult), xp:Math.ceil(420*scaleMult*bossLevelMult),
     flying:!!arch.flying, elite:true, boss:true,
     bossName:arch.name, bossPattern:arch.pattern, role:arch.role,
     shootCooldown:70, angle:0, flashTimer:0, dead:false,
@@ -1371,7 +1401,8 @@ function drawUpgradePanel(){
 
   // Título
   ctx.fillStyle='#00e5ff'; ctx.font=`bold 13px 'Orbitron',sans-serif`; ctx.textAlign='center';
-  ctx.fillText(`🧬 ÁRVORE DE EVOLUÇÃO — Nível ${evolution.level}`, W/2, py+22);
+  const cycleTag = evolution.resets>0 ? ` · Ciclo ${evolution.resets+1}` : '';
+  ctx.fillText(`🧬 ÁRVORE DE EVOLUÇÃO — Nível ${evolution.level}${cycleTag}`, W/2, py+22);
   ctx.fillStyle='rgba(200,232,255,0.45)'; ctx.font=`9px 'Share Tech Mono',monospace`;
   ctx.fillText(`${evolution.points} ponto(s) · XP ${evolution.xp}/${evolution.xpToNext} · [U] fechar`, W/2, py+38);
 
@@ -2484,7 +2515,7 @@ function spawnProjectile(x,y,tx,ty,type,isEnemy=false,extra={}){
   if(type==='grenade') {spd=5;  life=35; dmg=60*dmgMult;  size=5; col='#fbbf24';}
   if(type==='pellet')  {spd=14; life=18; dmg=10*dmgMult;  size=2; col='#fff';}
   if(type==='enemy')   {spd=10; life=32; dmg=6;           size=3; col='#fca5a5';}
-  if(type==='railgun') {spd=18; life=24; dmg=60*dmgMult;  size=3; col='#00ffff';}
+  if(type==='railgun') {spd=18; life=24; dmg=120*dmgMult;  size=3; col='#00ffff';}
   if(type==='chain')   {spd=10; life=20; dmg=20*dmgMult;  size=4; col='#a78bfa';}
   if(type==='void_bolt'){spd=9; life=40; dmg=12;          size=4; col='#7c3aed';}
   // Visual de crítico: proj maior e dourado
@@ -2917,7 +2948,10 @@ function buildMinimap(){
 
 function drawMinimap(){
   if(!mctx) return;
-
+// ── 1. INÍCIO DA FUNÇÃO: Detecta a atualização e dispara o scan ──
+  if (minimapDirty || minimapUpdateTimer <= 0) {
+    minimapScanY = 0; // Volta a linha para o topo (Y = 0) toda vez que o mapa atualiza
+  }
   // Só redesenha a cada 5s — no restante dos frames o canvas mantém a
   // última imagem (o navegador não limpa canvases sozinho entre draws).
   minimapUpdateTimer--;
@@ -2964,6 +2998,34 @@ function drawMinimap(){
       const rcx=rescueShip.x/TILE/WORLD_W*mw, rcy=rescueShip.y/TILE/WORLD_H*mh;
       mctx.strokeStyle='rgba(0,229,255,0.6)'; mctx.lineWidth=1;
       mctx.beginPath(); mctx.moveTo(rcx,rcy); mctx.lineTo(rsx,rsy); mctx.stroke();
+    }
+  }
+// ── 2. FIM DA FUNÇÃO: Desenha a linha de varredura por cima de tudo ──
+  if (minimapScanY >= 0) {
+    // Velocidade para completar a descida em aprox. 1.2 segundos (70 frames)
+    minimapScanSpeed = mh / 70;
+
+    // Gradiente de rastro/brilho
+    const scanGrad = mctx.createLinearGradient(0, minimapScanY - 12, 0, minimapScanY);
+    scanGrad.addColorStop(0, 'rgba(0, 229, 255, 0)');
+    scanGrad.addColorStop(1, 'rgba(0, 229, 255, 0.45)');
+
+    mctx.fillStyle = scanGrad;
+    mctx.fillRect(0, minimapScanY - 12, mw, 12);
+
+    // Linha Cyan principal com brilho
+    mctx.fillStyle = '#00e5ff';
+    mctx.shadowColor = '#00e5ff';
+    mctx.shadowBlur = 6;
+    mctx.fillRect(0, minimapScanY, mw, 2);
+    mctx.shadowBlur = 0; // Limpa o efeito de sombra/brilho
+
+    // Avança a posição Y da linha para o próximo frame
+    minimapScanY += minimapScanSpeed;
+
+    // Quando chega ao fundo do minimapa, desativa e aguarda o próximo update
+    if (minimapScanY > mh) {
+      minimapScanY = -1;
     }
   }
 }
@@ -3921,6 +3983,7 @@ function startGame(seed, mode){
   evolution.xp=0;evolution.level=1;evolution.xpToNext=xpForLevel(2);
   evolution.totalXP=0;evolution.points=0;
   evolution.unlocked.clear();
+  evolution.effectCounts={};evolution.resets=0;
   applyPassiveBonuses();
 
   cam.x=robot.x;cam.y=robot.y;
@@ -4042,6 +4105,11 @@ if(btnClearImport) btnClearImport.onclick=()=>{
 };
 const btnExportMap=document.getElementById('btnExportMap');
 if(btnExportMap) btnExportMap.onclick=()=>{ if(running && typeof exportCurrentMap==='function') exportCurrentMap(); else alert('Inicie um jogo antes de exportar.'); };
+// Versão do botão de exportar dentro do HUD (durante a partida) — mesma
+// função, sem o alerta de "inicie um jogo antes", já que só existe visível
+// enquanto #hud está ativo (running===true).
+const btnExportMapHud=document.getElementById('btnExportMapHud');
+if(btnExportMapHud) btnExportMapHud.onclick=()=>{ if(running && typeof exportCurrentMap==='function') exportCurrentMap(); };
 
 if(btnStart)   btnStart.onclick  = ()=>{
   WORLD_W=_selectedMapW; WORLD_H=_selectedMapH;

@@ -704,10 +704,12 @@ window.generateSurface = function generateSurface(rand, rng0) {
      fazer, porque ele pensa em cada tile isoladamente (clima local), não
      em como um tile reage ao vizinho. Ex.: lava não devia simplesmente
      "existir" do lado de água — na vida real ela esfria na hora.
-     Cada regra roda sobre um snapshot do terreno tirado ANTES desta
-     camada (`before`), então as regras desta camada não reagem em
-     cadeia entre si (uma regra não vê o resultado de outra rodando
-     antes dela na mesma geração — evita efeito dominó imprevisível). */
+     As regras rodam em ORDEM e cada uma vê o terreno já modificado pelas
+     regras anteriores da lista (é assim que "água cria praia" e depois
+     "praia vira pradaria perto da floresta" conseguem se encadear de
+     propósito) — mas cada regra individual não reage ao seu próprio
+     resultado no meio da sua própria varredura (usa um snapshot tirado
+     bem antes dela começar). Ver applyTerrainReactions() mais abaixo. */
   applyTerrainReactions(wg, ig);
 
   return [];
@@ -722,6 +724,13 @@ window.generateSurface = function generateSurface(rand, rng0) {
 //                 tiles AO REDOR dele (raio `ringRadius`, default 1) que
 //                 forem do tipo `ringFrom` viram `result`. O mestre em si
 //                 não muda.
+// A ORDEM da lista importa: cada regra enxerga o terreno já modificado
+// pelas regras anteriores (ver applyTerrainReactions). Por isso, p.ex.,
+// "Cinzas do choque térmico" roda ANTES de "Lava esfria em bioma frio"
+// (precisa ver a lava original para saber onde jogar cinza ao redor,
+// antes dela virar pedra), e "Praia genérica" roda ANTES de "Praia vira
+// pradaria perto da floresta" (a praia nova criada perto d'água só pode
+// virar pradaria depois de já existir).
 const TERRAIN_REACTIONS = [
   // ── mode:'self' ────────────────────────────────────────────
   { name:'Lava resfriada por água', mode:'self',
@@ -735,15 +744,36 @@ const TERRAIN_REACTIONS = [
     note:'água encostando em neve/gelo congela nas bordas do lago/rio' },
 
   // ── mode:'ring' ────────────────────────────────────────────
+  { name:'Cinzas do choque térmico', mode:'ring', ringRadius:1,
+    master:new Set([T.LAVA]), trigger:new Set([T.SNOW,T.ICE,T.TUNDRA]),
+    ringFrom:new Set([T.SNOW,T.ICE,T.TUNDRA]), result:T.VOLCANIC_ASH,
+    note:'lava encostando em regiões geladas gera cinzas vulcânicas ao redor' },
+
+  // ── mode:'self' (roda DEPOIS das cinzas — ver ordem acima) ──
+  { name:'Lava esfria em bioma frio', mode:'self',
+    master:new Set([T.LAVA]), trigger:new Set([T.SNOW,T.ICE,T.TUNDRA]),
+    result:T.ROCK,
+    note:'lava perto de neve/gelo/tundra esfria rápido demais e vira pedra' },
+
+  // ── mode:'ring' ────────────────────────────────────────────
   { name:'Oásis rochoso', mode:'ring', ringRadius:1,
     master:new Set([T.WATER,T.DEEP_WATER]), trigger:new Set([T.DESERT]),
     ringFrom:new Set([T.DESERT,T.SAND]), result:T.ROCK,
     note:'água em pleno deserto expõe rocha ao redor da nascente (oásis)' },
 
-  { name:'Cinzas do choque térmico', mode:'ring', ringRadius:1,
-    master:new Set([T.LAVA]), trigger:new Set([T.SNOW,T.ICE,T.TUNDRA]),
-    ringFrom:new Set([T.SNOW,T.ICE,T.TUNDRA]), result:T.VOLCANIC_ASH,
-    note:'lava encostando em regiões geladas gera cinzas vulcânicas ao redor' },
+  { name:'Praia genérica', mode:'ring', ringRadius:1,
+    master:new Set([T.WATER,T.DEEP_WATER]),
+    trigger:new Set([T.GRASS,T.FOREST,T.SAVANNA,T.SWAMP,T.MUSHROOM,T.GHOST_GRASS]),
+    ringFrom:new Set([T.GRASS,T.FOREST,T.SAVANNA,T.SWAMP,T.MUSHROOM,T.GHOST_GRASS]),
+    result:T.SAND,
+    note:'água encostando em qualquer bioma "verde" forma uma faixa de praia ao redor '+
+         '(cobre principalmente os rios, que antes cortavam a floresta/grama sem transição)' },
+
+  // ── mode:'self' (roda DEPOIS de "Praia genérica" — ver ordem acima) ──
+  { name:'Praia vira pradaria perto da floresta', mode:'self',
+    master:new Set([T.SAND]), trigger:new Set([T.FOREST]),
+    result:T.GRASS,
+    note:'praia colada direto na floresta não combina — a mata toma conta da areia e vira pradaria' },
 
   { name:'Depósito cristalino', mode:'ring', ringRadius:1,
     master:new Set([T.CRYSTAL]), trigger:new Set([T.WATER,T.DEEP_WATER]),
@@ -766,11 +796,15 @@ function _neighborHasType(before, tx, ty, W, H, typeSet){
 
 function applyTerrainReactions(wg, ig){
   const W=WORLD_W, H=WORLD_H;
-  // Snapshot tirado ANTES desta camada — todas as regras enxergam o mesmo
-  // terreno "de partida", nenhuma reage ao resultado de outra regra.
-  const before = wg.slice();
 
   for(const rule of TERRAIN_REACTIONS){
+    // Snapshot tirado ANTES desta regra específica — ou seja, cada regra já
+    // enxerga o que as regras ANTERIORES da lista fizeram (permite cascata
+    // proposital entre regras, ex: praia→pradaria depois de água→praia),
+    // mas nunca reage ao seu próprio resultado no meio da sua própria
+    // varredura (evita efeito dominó incontrolável dentro da mesma regra).
+    const before = wg.slice();
+
     // Se o resultado é um bloco sólido/destrutível, usa a mesma convenção
     // do resto do gerador (ig = BLOCK_INTEGRITY[tile] || 100); se é um tile
     // de bioma/piso normal (não-sólido), integridade não importa → 0.
